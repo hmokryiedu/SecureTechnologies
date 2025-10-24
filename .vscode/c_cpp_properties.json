@@ -1,0 +1,22 @@
+{
+    "configurations": [
+        {
+            "name": "windows-gcc-x86",
+            "includePath": [
+                "C:\\MinGW\\include",
+                "C:\\MinGw\\lib\\gcc\\x86_64-w64-mingw32\\15.2.0\\include",
+                "C:\\MinGw\\include\\c++",
+                "C:\\MinGw\\include\\c++\\15.2.0\\x86_64-w64-mingw32",
+                "C:\\MinGw\\include\\c++\\15.2.0"
+            ],
+            "compilerPath": "C:/MinGW/bin/g++   .exe",
+            "cStandard": "c11",
+            "cppStandard": "c++17",
+            "intelliSenseMode": "windows-gcc-x86",
+            "compilerArgs": [
+                ""
+            ]
+        }
+    ],
+    "version": 4
+}
