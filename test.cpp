@@ -232,7 +232,7 @@ void StartServer() {
     protectionMode = (SendMessage(hModeCombo, CB_GETCURSEL, 0, 0) == 1);
     
     if (!pServer) {
-        pServer = new PipeServer<UserAuthData>("\\\\ServerName\\pipe\\AuthPipe", 3);
+        pServer = new PipeServer<UserAuthData>("\\\\.\\pipe\\AuthPipe", 3);
         pServer->SetConnectCallback(OnClientConnect);
         pServer->SetReadCallback(OnClientRead);
         pServer->SetDisconnectCallback(OnClientDisconnect);
@@ -242,7 +242,7 @@ void StartServer() {
         AddLog("========================================");
         AddLog("SERVER STARTED");
         AddLog("Mode: " + std::string(protectionMode ? "Anti-hacking mode" : "Normal mode"));
-        AddLog("Pipe name: \\\\ServerName\\pipe\\AuthPipe");
+        AddLog("Pipe name: \\\\.\\pipe\\AuthPipe");
         AddLog("Instances: 3");
         AddLog("========================================");
         
