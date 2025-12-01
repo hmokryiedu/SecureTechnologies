@@ -74,18 +74,13 @@ bool RuleBasedAttack::LoadDictionaryFromFile(const std::string& filename) {
 
 void RuleBasedAttack::GenerateVariants() {
     variants.clear();
+    variantSet.clear();
     currentIndex = 0;
 
-    std::set<std::string> uniqueVariants; // Avoid duplicates
-
     // Apply all transformation rules to each dictionary entry
+    // AddVariant() handles duplicate checking via variantSet
     for (const auto& basePassword : dictionary) {
         ApplyAllRules(basePassword);
-    }
-
-    // Convert set to vector for indexed access
-    for (const auto& variant : uniqueVariants) {
-        variants.push_back(variant);
     }
 }
 
@@ -102,8 +97,9 @@ double RuleBasedAttack::GetProgressPercent() const {
 }
 
 void RuleBasedAttack::AddVariant(const std::string& variant) {
-    // Check if variant already exists
-    if (std::find(variants.begin(), variants.end(), variant) == variants.end()) {
+    // Check if variant already exists using O(1) unordered_set lookup
+    if (variantSet.find(variant) == variantSet.end()) {
+        variantSet.insert(variant);
         variants.push_back(variant);
     }
 }

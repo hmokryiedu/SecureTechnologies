@@ -7,6 +7,7 @@ class PipeClient {
 private:
     HANDLE hPipe;
     std::string pipeName;
+    std::string lastComputerName;
     static const int BUFFER_SIZE = 512;
 
 public:
@@ -22,4 +23,5 @@ public:
 private:
     bool SendData(const std::string& data);
     bool ReceiveResponse(char& response);
+    bool Reconnect();
 };

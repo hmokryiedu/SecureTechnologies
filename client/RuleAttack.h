@@ -3,11 +3,13 @@
 #include <string>
 #include <vector>
 #include <map>
+#include <unordered_set>
 
 class RuleBasedAttack {
 private:
     std::vector<std::string> dictionary;
     std::vector<std::string> variants;
+    std::unordered_set<std::string> variantSet;
     size_t currentIndex;
 
     static const std::map<char, std::string> latinToCyrillic;

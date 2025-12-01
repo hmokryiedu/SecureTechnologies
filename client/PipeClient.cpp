@@ -3,7 +3,7 @@
 #include <sstream>
 
 PipeClient::PipeClient(const std::string& name)
-    : hPipe(INVALID_HANDLE_VALUE), pipeName(name) {
+    : hPipe(INVALID_HANDLE_VALUE), pipeName(name), lastComputerName(".") {
 }
 
 PipeClient::~PipeClient() {
@@ -11,6 +11,7 @@ PipeClient::~PipeClient() {
 }
 
 bool PipeClient::Connect(const std::string& computerName) {
+    lastComputerName = computerName;
     std::string fullPipeName;
     if (computerName == ".") {
         fullPipeName = "\\\\.\\pipe\\AuthPipe";
@@ -71,6 +72,11 @@ bool PipeClient::IsConnected() const {
     return hPipe != INVALID_HANDLE_VALUE;
 }
 
+bool PipeClient::Reconnect() {
+    Disconnect();
+    return Connect(lastComputerName);
+}
+
 std::string PipeClient::GetLastErrorMsg() const {
     DWORD error = ::GetLastError();
     LPSTR errorText = NULL;
@@ -95,9 +101,18 @@ std::string PipeClient::GetLastErrorMsg() const {
 bool PipeClient::SendData(const std::string& data) {
     DWORD bytesWritten;
     if (!WriteFile(hPipe, data.c_str(), (DWORD)data.length(), &bytesWritten, NULL)) {
-        std::cout << "[!] WriteFile failed: " << GetLastErrorMsg();
-        Disconnect();
-        return false;
+        std::cout << "[!] WriteFile failed, attempting reconnection...\n";
+        if (Reconnect()) {
+            std::cout << "[*] Reconnected, retrying...\n";
+            if (!WriteFile(hPipe, data.c_str(), (DWORD)data.length(), &bytesWritten, NULL)) {
+                std::cout << "[!] WriteFile failed after reconnection: " << GetLastErrorMsg() << "\n";
+                Disconnect();
+                return false;
+            }
+        } else {
+            std::cout << "[!] Failed to reconnect to server\n";
+            return false;
+        }
     }
 
     if (bytesWritten != data.length()) {
@@ -111,9 +126,18 @@ bool PipeClient::SendData(const std::string& data) {
 bool PipeClient::ReceiveResponse(char& response) {
     DWORD bytesRead;
     if (!ReadFile(hPipe, &response, 1, &bytesRead, NULL)) {
-        std::cout << "[!] ReadFile failed: " << GetLastErrorMsg();
-        Disconnect();
-        return false;
+        std::cout << "[!] ReadFile failed, attempting reconnection...\n";
+        if (Reconnect()) {
+            std::cout << "[*] Reconnected, retrying...\n";
+            if (!ReadFile(hPipe, &response, 1, &bytesRead, NULL)) {
+                std::cout << "[!] ReadFile failed after reconnection: " << GetLastErrorMsg() << "\n";
+                Disconnect();
+                return false;
+            }
+        } else {
+            std::cout << "[!] Failed to reconnect to server\n";
+            return false;
+        }
     }
 
     if (bytesRead != 1) {

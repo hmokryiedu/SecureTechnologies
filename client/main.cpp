@@ -183,9 +183,13 @@ void ModeBruteForce() {
             std::cout << "Password:     " << password << "\n";
             std::cout << "Attempts:     " << generator.GetAttemptCount() << "\n";
             std::cout << "Time:         " << timer.GetElapsedFormatted() << "\n";
-            std::cout << "Rate:         " << std::fixed << std::setprecision(1)
-                      << (generator.GetAttemptCount() * 1000.0 / timer.GetElapsed())
-                      << " passwords/second\n";
+            std::cout << "Rate:         " << std::fixed << std::setprecision(1);
+            unsigned long long elapsed = timer.GetElapsed();
+            if (elapsed > 0) {
+                std::cout << (generator.GetAttemptCount() * 1000.0 / elapsed) << " passwords/second\n";
+            } else {
+                std::cout << "-- passwords/second\n";
+            }
             Console::PrintSeparator('=', 70);
             break;
         }
@@ -193,11 +197,15 @@ void ModeBruteForce() {
         // Show progress every N attempts
         if (generator.GetAttemptCount() % progressInterval == 0) {
             Console::ClearLine();
+            unsigned long long elapsed = timer.GetElapsed();
             std::cout << "Attempt " << generator.GetAttemptCount()
                       << ": " << password
-                      << " | " << std::fixed << std::setprecision(1)
-                      << (generator.GetAttemptCount() * 1000.0 / timer.GetElapsed())
-                      << " pwd/sec";
+                      << " | " << std::fixed << std::setprecision(1);
+            if (elapsed > 0) {
+                std::cout << (generator.GetAttemptCount() * 1000.0 / elapsed) << " pwd/sec";
+            } else {
+                std::cout << "-- pwd/sec";
+            }
             std::cout.flush();
         }
     }
@@ -272,9 +280,13 @@ void ModeRuleBasedAttack() {
             std::cout << "Password:     " << password << "\n";
             std::cout << "Attempts:     " << attemptCount << "\n";
             std::cout << "Time:         " << timer.GetElapsedFormatted() << "\n";
-            std::cout << "Rate:         " << std::fixed << std::setprecision(1)
-                      << (attemptCount * 1000.0 / timer.GetElapsed())
-                      << " passwords/second\n";
+            std::cout << "Rate:         " << std::fixed << std::setprecision(1);
+            unsigned long long elapsedMs = timer.GetElapsed();
+            if (elapsedMs > 0) {
+                std::cout << (attemptCount * 1000.0 / elapsedMs) << " passwords/second\n";
+            } else {
+                std::cout << "-- passwords/second\n";
+            }
             Console::PrintSeparator('=', 70);
             break;
         }
@@ -282,10 +294,14 @@ void ModeRuleBasedAttack() {
         // Show progress
         if (attemptCount % progressInterval == 0) {
             Console::ClearLine();
+            unsigned long long elapsedTime = timer.GetElapsed();
             std::cout << "Attempt " << attemptCount << ": " << password
-                      << " | " << std::fixed << std::setprecision(1)
-                      << (attemptCount * 1000.0 / timer.GetElapsed())
-                      << " pwd/sec";
+                      << " | " << std::fixed << std::setprecision(1);
+            if (elapsedTime > 0) {
+                std::cout << (attemptCount * 1000.0 / elapsedTime) << " pwd/sec";
+            } else {
+                std::cout << "-- pwd/sec";
+            }
             std::cout.flush();
         }
     }
