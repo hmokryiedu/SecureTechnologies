@@ -1,414 +1,114 @@
 #include <windows.h>
-#include <iostream>
-#include <fstream>
-#include <sstream>
 #include <string>
-#include <map>
-#include <mutex>
-#include <commdlg.h>
-#include "PipeServer.h"
-#include "PerPipeStruct.h"
 #include "list.h"
+#include "PipeServer.h"
 
-// Structure for credentials
-struct Credentials {
-    std::string login;
-    std::string password;
-};
+// Ідентифікатори для кнопок
+#define IDC_LOAD_BTN 101
+#define IDC_START_BTN 102
+#define IDC_PROTECT_CHK 103
+#define IDC_LOG_LIST 104
 
-// User-specific data for each pipe
-struct UserAuthData {
-    DWORD lastAttemptTime;
-    DWORD blockDuration;
-    int attemptCount;
-    
-    UserAuthData() : lastAttemptTime(0), blockDuration(0), attemptCount(0) {}
-};
+UserList g_Users;
+PipeServer g_Server;
 
-// Global variables
-List<Credentials> credentialsList;
-int maxLoginLen = 0, maxPasswordLen = 0;
-bool protectionMode = false;
-std::map<std::string, int> loginAttempts;
-std::map<std::string, DWORD> loginBlockTime;
-std::mutex dataMutex;
+// Функція обробки повідомлень вікна
+LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
+    switch (uMsg) {
+    case WM_CREATE:
+        // Кнопка завантаження файлу
+        CreateWindow("BUTTON", "Load Users File", WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON,
+            10, 10, 120, 30, hwnd, (HMENU)IDC_LOAD_BTN, NULL, NULL);
 
-HWND hMainWnd, hLogEdit, hModeCombo, hStartBtn, hStopBtn, hStatusLabel;
-PipeServer<UserAuthData>* pServer = nullptr;
+        // Чекбокс захисту
+        CreateWindow("BUTTON", "Anti-Brute-Force Mode", WS_VISIBLE | WS_CHILD | BS_AUTOCHECKBOX,
+            140, 10, 180, 30, hwnd, (HMENU)IDC_PROTECT_CHK, NULL, NULL);
 
-// Function for adding a log message
-void AddLog(const std::string& message) {
-    std::lock_guard<std::mutex> lock(dataMutex);
-    
-    if (hLogEdit) {
-        int len = GetWindowTextLength(hLogEdit);
-        SendMessage(hLogEdit, EM_SETSEL, len, len);
-        
-        SYSTEMTIME st;
-        GetLocalTime(&st);
-        char timeStr[64];
-        sprintf(timeStr, "[%02d:%02d:%02d] ", st.wHour, st.wMinute, st.wSecond);
-        
-        std::string logMsg = timeStr + message + "\r\n";
-        SendMessage(hLogEdit, EM_REPLACESEL, FALSE, (LPARAM)logMsg.c_str());
-    } else {
-        std::cout << message << std::endl;
-    }
-}
+        // Кнопка старту
+        CreateWindow("BUTTON", "Start Server", WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON,
+            330, 10, 100, 30, hwnd, (HMENU)IDC_START_BTN, NULL, NULL);
 
-// Update server status label
-void UpdateStatus(const std::string& status) {
-    if (hStatusLabel) {
-        SetWindowTextA(hStatusLabel, status.c_str());
-    }
-}
+        // Список для логів
+        CreateWindowEx(WS_EX_CLIENTEDGE, "LISTBOX", NULL, 
+            WS_CHILD | WS_VISIBLE | WS_VSCROLL | LBS_NOTIFY,
+            10, 50, 460, 300, hwnd, (HMENU)IDC_LOG_LIST, NULL, NULL);
+        break;
 
-// Read credentials file
-bool LoadCredentials(const std::string& filename) {
-    std::ifstream file(filename);
-    if (!file.is_open()) {
-        AddLog("ERROR: Failed to open the file!");
-        return false;
-    }
-    
-    credentialsList.clear();
-    loginAttempts.clear();
-    loginBlockTime.clear();
-    
-    std::string line;
-    
-    // The first line — maximum login/password lengths
-    if (std::getline(file, line)) {
-        std::istringstream iss(line);
-        iss >> maxLoginLen >> maxPasswordLen;
-        AddLog("Max lengths: login=" + std::to_string(maxLoginLen) + 
-               ", password=" + std::to_string(maxPasswordLen));
-    }
-    
-    // Read login-password pairs
-    int count = 0;
-    while (std::getline(file, line) && count < 20) {
-        std::istringstream iss(line);
-        Credentials cred;
-        if (iss >> cred.login >> cred.password) {
-            credentialsList.push_back(cred);
-            loginAttempts[cred.login] = 0;
-            loginBlockTime[cred.login] = 0;
-            count++;
-        }
-    }
-    
-    file.close();
-    
-    if (count == 0) {
-        AddLog("ERROR: No accounts found!");
-        return false;
-    }
-    
-    AddLog("Loaded " + std::to_string(count) + " accounts");
-    return true;
-}
-
-// Verify user credentials
-bool CheckCredentials(const std::string& login, const std::string& password) {
-    for (auto it = credentialsList.begin(); it != credentialsList.end(); ++it) {
-        if (it->login == login && it->password == password) {
-            return true;
-        }
-    }
-    return false;
-}
-
-// Callback when a client connects
-void OnClientConnect(PerPipeStruct<UserAuthData>* ps, void* userData) {
-    AddLog("Pipe #" + std::to_string(ps->pipeId) + ": Client connected");
-    UpdateStatus("Active connections: " + std::to_string(pServer->GetPipeCount()));
-    
-    if (!ps->userData) {
-        ps->userData = new UserAuthData();
-    }
-}
-
-// Callback when data is received
-void OnClientRead(PerPipeStruct<UserAuthData>* ps, void* userData) {
-    std::string data(ps->buffer);
-    
-    // Split login and password
-    size_t spacePos = data.find(' ');
-    if (spacePos == std::string::npos) {
-        AddLog("Pipe #" + std::to_string(ps->pipeId) + ": Invalid data format");
-        char response = '0';
-        pServer->WriteResponse(ps, &response, 1);
-        return;
-    }
-    
-    std::string login = data.substr(0, spacePos);
-    std::string password = data.substr(spacePos + 1);
-    
-    AddLog("Pipe #" + std::to_string(ps->pipeId) + ": Login attempt for user '" + login + "'");
-    
-    // Anti-hacking protection mode
-    if (protectionMode && ps->userData) {
-        std::lock_guard<std::mutex> lock(dataMutex);
-        
-        DWORD currentTime = GetTickCount();
-        DWORD blockTime = loginBlockTime[login];
-        
-        if (blockTime > 0) {
-            AddLog("Pipe #" + std::to_string(ps->pipeId) + 
-                   ": Delay " + std::to_string(blockTime) + " ms for '" + login + "'");
-            Sleep(blockTime);
-        }
-    }
-    
-    // Check credentials
-    bool success = CheckCredentials(login, password);
-    
-    if (success) {
-        AddLog("Pipe #" + std::to_string(ps->pipeId) + ": ✓ Successful authentication for '" + login + "'");
-        
-        // Reset attempt counter
-        if (protectionMode) {
-            std::lock_guard<std::mutex> lock(dataMutex);
-            loginAttempts[login] = 0;
-            loginBlockTime[login] = 0;
-        }
-    } else {
-        AddLog("Pipe #" + std::to_string(ps->pipeId) + ": ✗ Invalid password for '" + login + "'");
-        
-        // Increase blocking time
-        if (protectionMode) {
-            std::lock_guard<std::mutex> lock(dataMutex);
-            loginAttempts[login]++;
-            loginBlockTime[login] += 1000; // +1 second delay
-            AddLog("  Attempts for '" + login + "': " + std::to_string(loginAttempts[login]));
-        }
-    }
-    
-    // Send response to client
-    char response = success ? '1' : '0';
-    pServer->WriteResponse(ps, &response, 1);
-}
-
-// Callback when a client disconnects
-void OnClientDisconnect(PerPipeStruct<UserAuthData>* ps, void* userData) {
-    AddLog("Pipe #" + std::to_string(ps->pipeId) + ": Client disconnected");
-}
-
-// File selection dialog
-bool OpenFileDialog(std::string& filename) {
-    char szFile[260] = {0};
-    OPENFILENAME ofn = {0};
-    
-    ofn.lStructSize = sizeof(ofn);
-    ofn.hwndOwner = hMainWnd;
-    ofn.lpstrFile = szFile;
-    ofn.nMaxFile = sizeof(szFile);
-    ofn.lpstrFilter = "Text Files (*.txt)\0*.txt\0All Files (*.*)\0*.*\0";
-    ofn.nFilterIndex = 1;
-    ofn.Flags = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST;
-    
-    if (GetOpenFileName(&ofn)) {
-        filename = szFile;
-        return true;
-    }
-    return false;
-}
-
-// Start the server
-void StartServer() {
-    if (pServer && pServer->IsRunning()) return;
-    
-    std::string filename;
-    if (!OpenFileDialog(filename)) {
-        return;
-    }
-    
-    AddLog("Selected file: " + filename);
-    if (!LoadCredentials(filename)) {
-        return;
-    }
-    
-    protectionMode = (SendMessage(hModeCombo, CB_GETCURSEL, 0, 0) == 1);
-    
-    if (!pServer) {
-        pServer = new PipeServer<UserAuthData>("\\\\ServerName\\pipe\\AuthPipe", 3);
-        pServer->SetConnectCallback(OnClientConnect);
-        pServer->SetReadCallback(OnClientRead);
-        pServer->SetDisconnectCallback(OnClientDisconnect);
-    }
-    
-    if (pServer->Start()) {
-        AddLog("========================================");
-        AddLog("SERVER STARTED");
-        AddLog("Mode: " + std::string(protectionMode ? "Anti-hacking mode" : "Normal mode"));
-        AddLog("Pipe name: \\\\ServerName\\pipe\\AuthPipe");
-        AddLog("Instances: 3");
-        AddLog("========================================");
-        
-        EnableWindow(hStartBtn, FALSE);
-        EnableWindow(hStopBtn, TRUE);
-        EnableWindow(hModeCombo, FALSE);
-        UpdateStatus("Server is running");
-    } else {
-        AddLog("ERROR: Failed to start server!");
-    }
-}
-
-// Stop the server
-void StopServer() {
-    if (!pServer || !pServer->IsRunning()) return;
-    
-    AddLog("========================================");
-    AddLog("STOPPING SERVER...");
-    
-    pServer->Stop();
-    
-    AddLog("SERVER STOPPED");
-    AddLog("========================================");
-    
-    EnableWindow(hStartBtn, TRUE);
-    EnableWindow(hStopBtn, FALSE);
-    EnableWindow(hModeCombo, TRUE);
-    UpdateStatus("Server stopped");
-    
-    // Ask if user wants to restart the server
-    int result = MessageBox(hMainWnd, 
-        "Restart the server?", 
-        "Confirmation", 
-        MB_YESNO | MB_ICONQUESTION);
-    
-    if (result == IDYES) {
-        StartServer();
-    }
-}
-
-// Message handler
-LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
-    switch (msg) {
-        case WM_CREATE: {
-            // Operating mode
-            CreateWindow("STATIC", "Operating mode:", WS_VISIBLE | WS_CHILD,
-                10, 10, 100, 30, hwnd, NULL, NULL, NULL);
-            
-            hModeCombo = CreateWindow("COMBOBOX", "", 
-                WS_VISIBLE | WS_CHILD | CBS_DROPDOWNLIST | WS_VSCROLL,
-                120, 10, 200, 100, hwnd, (HMENU)1, NULL, NULL);
-            SendMessage(hModeCombo, CB_ADDSTRING, 0, (LPARAM)"Normal");
-            SendMessage(hModeCombo, CB_ADDSTRING, 0, (LPARAM)"Anti-hacking");
-            SendMessage(hModeCombo, CB_SETCURSEL, 0, 0);
-            
-            // Buttons
-            hStartBtn = CreateWindow("BUTTON", "Load and Start",
-                WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON,
-                10, 40, 180, 30, hwnd, (HMENU)2, NULL, NULL);
-            
-            hStopBtn = CreateWindow("BUTTON", "Stop",
-                WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON,
-                200, 40, 120, 30, hwnd, (HMENU)3, NULL, NULL);
-            EnableWindow(hStopBtn, FALSE);
-            
-            // Status
-            hStatusLabel = CreateWindow("STATIC", "Status: Waiting to start",
-                WS_VISIBLE | WS_CHILD | SS_LEFT,
-                340, 45, 400, 20, hwnd, NULL, NULL, NULL);
-            
-            // Log
-            CreateWindow("STATIC", "Event log:", WS_VISIBLE | WS_CHILD,
-                10, 80, 100, 20, hwnd, NULL, NULL, NULL);
-            
-            hLogEdit = CreateWindow("EDIT", "",
-                WS_VISIBLE | WS_CHILD | WS_BORDER | WS_VSCROLL | 
-                ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY,
-                10, 105, 760, 375, hwnd, NULL, NULL, NULL);
-            
-            // Timer for processing server events
-            SetTimer(hwnd, 1, 50, NULL);
-            
+    case WM_COMMAND:
+        switch (LOWORD(wParam)) {
+        case IDC_LOAD_BTN:
+            if (g_Users.Load(hwnd)) {
+                string msg = "Loaded " + to_string(g_Users.Count()) + " users.";
+                SendDlgItemMessage(hwnd, IDC_LOG_LIST, LB_ADDSTRING, 0, (LPARAM)msg.c_str());
+            }
             break;
-        }
-        
-        case WM_TIMER: {
-            if (pServer && pServer->IsRunning()) {
-                pServer->ProcessEvents(10);
+
+        case IDC_PROTECT_CHK:
+            {
+                BOOL checked = IsDlgButtonChecked(hwnd, IDC_PROTECT_CHK);
+                g_Users.SetProtection(checked == BST_CHECKED);
+                SendDlgItemMessage(hwnd, IDC_LOG_LIST, LB_ADDSTRING, 0, 
+                    (LPARAM)(checked ? "Protection ON" : "Protection OFF"));
+            }
+            break;
+
+        case IDC_START_BTN:
+            if (g_Users.Count() == 0) {
+                MessageBox(hwnd, "Please load users file first!", "Error", MB_ICONERROR);
+            } else {
+                g_Server.Start(3, &g_Users, hwnd); // Запускаємо 3 потоки
+                EnableWindow(GetDlgItem(hwnd, IDC_START_BTN), FALSE); // Блокуємо кнопку
             }
             break;
         }
-        
-        case WM_COMMAND: {
-            if (LOWORD(wParam) == 2) {
-                StartServer();
-            } else if (LOWORD(wParam) == 3) {
-                StopServer();
-            }
-            break;
+        break;
+
+    case WM_LOG_MSG: 
+        {
+            // Отримали лог від сервера
+            char* text = (char*)wParam;
+            int idx = SendDlgItemMessage(hwnd, IDC_LOG_LIST, LB_ADDSTRING, 0, (LPARAM)text);
+            SendDlgItemMessage(hwnd, IDC_LOG_LIST, LB_SETTOPINDEX, idx, 0); // Прокрутка вниз
+            delete[] text;
         }
-        
-        case WM_CLOSE: {
-            if (pServer && pServer->IsRunning()) {
-                int result = MessageBox(hwnd, 
-                    "The server is running. Are you sure you want to exit?",
-                    "Confirmation", 
-                    MB_YESNO | MB_ICONWARNING);
-                if (result == IDNO) return 0;
-                StopServer();
-            }
-            DestroyWindow(hwnd);
-            break;
-        }
-        
-        case WM_DESTROY:
-            KillTimer(hwnd, 1);
-            if (pServer) {
-                delete pServer;
-                pServer = nullptr;
-            }
-            PostQuitMessage(0);
-            break;
-            
-        default:
-            return DefWindowProc(hwnd, msg, wParam, lParam);
+        break;
+
+    case WM_DESTROY:
+        PostQuitMessage(0);
+        break;
+
+    default:
+        return DefWindowProc(hwnd, uMsg, wParam, lParam);
     }
     return 0;
 }
 
-// Main function
-int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
-    // Register window class
-    WNDCLASSEX wc = {0};
-    wc.cbSize = sizeof(WNDCLASSEX);
-    wc.lpfnWndProc = WndProc;
+// Головна функція (замість main)
+int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow) {
+    const char CLASS_NAME[] = "LabServerClass";
+
+    WNDCLASS wc = {};
+    wc.lpfnWndProc = WindowProc;
     wc.hInstance = hInstance;
+    wc.lpszClassName = CLASS_NAME;
     wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
-    wc.lpszClassName = "ServerClass";
     wc.hCursor = LoadCursor(NULL, IDC_ARROW);
-    
-    if (!RegisterClassEx(&wc)) {
-        MessageBox(NULL, "Registration error!", "Error", MB_ICONERROR);
-        return 0;
-    }
-    
-    // Create window
-    hMainWnd = CreateWindowEx(0, "ServerClass", 
-        "Administrator Server Application (using PipeServer)",
-        WS_OVERLAPPEDWINDOW,
-        CW_USEDEFAULT, CW_USEDEFAULT, 800, 550,
+
+    RegisterClass(&wc);
+
+    HWND hwnd = CreateWindow(CLASS_NAME, "Password Server (Admin)", WS_OVERLAPPEDWINDOW,
+        CW_USEDEFAULT, CW_USEDEFAULT, 500, 400,
         NULL, NULL, hInstance, NULL);
-    
-    if (!hMainWnd) {
-        MessageBox(NULL, "Failed to create window!", "Error", MB_ICONERROR);
-        return 0;
-    }
-    
-    ShowWindow(hMainWnd, nCmdShow);
-    UpdateWindow(hMainWnd);
-    
-    // Message loop
-    MSG msg;
+
+    if (hwnd == NULL) return 0;
+
+    ShowWindow(hwnd, nCmdShow);
+
+    MSG msg = {};
     while (GetMessage(&msg, NULL, 0, 0)) {
         TranslateMessage(&msg);
         DispatchMessage(&msg);
     }
-    
-    return (int)msg.wParam;
+
+    return 0;
 }
