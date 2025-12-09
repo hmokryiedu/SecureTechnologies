@@ -2,185 +2,112 @@
 #include <windows.h>
 #include <string>
 #include <vector>
+#include <sstream>
 #include "PerPipeStruct.h"
-#include "list.h"
 
-template<typename T>
+#define PIPE_NAME "\\\\.\\pipe\\AuthPipe" 
+#define BUFFER_SIZE 512
+
 class PipeServer {
 private:
-    std::string pipeName;
-    int numInstances;
-    List<PerPipeStruct<T>*> pipeList;
+    vector<HANDLE> threads;
     bool isRunning;
-    HANDLE hStopEvent;
-    
-    typedef void (*ReadCallback)(PerPipeStruct<T>*, void*);
-    typedef void (*ConnectCallback)(PerPipeStruct<T>*, void*);
-    typedef void (*DisconnectCallback)(PerPipeStruct<T>*, void*);
-    
-    ReadCallback onReadCallback;
-    ConnectCallback onConnectCallback;
-    DisconnectCallback onDisconnectCallback;
-    void* callbackUserData;
 
-public:
-    PipeServer(const std::string& name, int instances = 3) 
-        : pipeName(name), numInstances(instances), isRunning(false),
-          onReadCallback(nullptr), onConnectCallback(nullptr), 
-          onDisconnectCallback(nullptr), callbackUserData(nullptr) {
-        hStopEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
+    // Логування в GUI
+    static void Log(HWND hGui, const string& text) {
+        char* buf = new char[text.length() + 1];
+        strcpy_s(buf, text.length() + 1, text.c_str());
+        PostMessage(hGui, WM_LOG_MSG, (WPARAM)buf, 0);
     }
-    
-    ~PipeServer() {
-        Stop();
-        CloseHandle(hStopEvent);
-        
-        // Cleanup of all pipes
-        for (auto it = pipeList.begin(); it != pipeList.end(); ++it) {
-            delete *it;
-        }
-        pipeList.clear();
-    }
-    
-    void SetReadCallback(ReadCallback callback, void* userData = nullptr) {
-        onReadCallback = callback;
-        callbackUserData = userData;
-    }
-    
-    void SetConnectCallback(ConnectCallback callback, void* userData = nullptr) {
-        onConnectCallback = callback;
-        callbackUserData = userData;
-    }
-    
-    void SetDisconnectCallback(DisconnectCallback callback, void* userData = nullptr) {
-        onDisconnectCallback = callback;
-        callbackUserData = userData;
-    }
-    
-    bool Start() {
-        if (isRunning) return false;
-        
-        ResetEvent(hStopEvent);
-        isRunning = true;
-        
-        // Creating pipe instances
-        for (int i = 0; i < numInstances; i++) {
-            PerPipeStruct<T>* pipeStruct = new PerPipeStruct<T>();
-            pipeStruct->pipeId = i + 1;
-            
-            pipeStruct->hPipe = CreateNamedPipeA(
-                pipeName.c_str(),
-                PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
+
+    // Потік обробки
+    static DWORD WINAPI PipeInstanceThread(LPVOID lpvParam) {
+        PerPipeData* data = (PerPipeData*)lpvParam;
+        char buffer[BUFFER_SIZE];
+        DWORD bytesRead, bytesWritten;
+        BOOL success;
+
+        while (true) {
+            // 1. Створюємо канал
+            data->hPipe = CreateNamedPipeA(
+                PIPE_NAME,
+                PIPE_ACCESS_DUPLEX,
                 PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
                 PIPE_UNLIMITED_INSTANCES,
-                512, 512, 0, NULL
-            );
-            
-            if (pipeStruct->hPipe == INVALID_HANDLE_VALUE) {
-                delete pipeStruct;
-                continue;
+                BUFFER_SIZE, BUFFER_SIZE,
+                0, NULL);
+
+            if (data->hPipe == INVALID_HANDLE_VALUE) {
+                Log(data->hGui, "Error creating pipe.");
+                break;
             }
-            
-            pipeList.push_back(pipeStruct);
-            
-            // Asynchronous connection waiting
-            ConnectNamedPipe(pipeStruct->hPipe, &pipeStruct->overlap);
-        }
-        
-        return true;
-    }
-    
-    void Stop() {
-        if (!isRunning) return;
-        
-        isRunning = false;
-        SetEvent(hStopEvent);
-        
-        // Closing all pipes
-        for (auto it = pipeList.begin(); it != pipeList.end(); ++it) {
-            PerPipeStruct<T>* ps = *it;
-            if (ps->connected) {
-                DisconnectNamedPipe(ps->hPipe);
+
+            // 2. Чекаємо клієнта
+            BOOL connected = ConnectNamedPipe(data->hPipe, NULL) ? TRUE : (GetLastError() == ERROR_PIPE_CONNECTED);
+
+            if (connected) {
+                string loginStr, passStr;
+
+                // 3. Читаємо повідомлення (Логін + Пароль)
+                ZeroMemory(buffer, BUFFER_SIZE);
+                success = ReadFile(data->hPipe, buffer, BUFFER_SIZE - 1, &bytesRead, NULL);
+
+                if (success && bytesRead > 0) {
+                    string fullMessage(buffer);
+                    stringstream ss(fullMessage);
+                    ss >> loginStr;
+                    if (!ss.eof()) ss >> passStr;
+
+                    // 4. Перевірка
+                    int res = data->userList->CheckUser(loginStr, passStr);
+                    DWORD replyValue = 0; 
+
+                    if (res == -1) {
+                        // Блокування логуємо
+                        Log(data->hGui, "[PROTECT] Ignored: " + loginStr);
+                        Sleep(1000);
+                        replyValue = 0;
+                    }
+                    else if (res == 1) {
+                        // Успіх логуємо
+                        Log(data->hGui, "[SUCCESS] Login: " + loginStr);
+                    }
+                    else {
+                        // Невдачу не логуємо
+                        replyValue = 0;
+                    }
+
+                    // 5. Відправка відповіді (4 байти числа)
+                    WriteFile(data->hPipe, &replyValue, sizeof(DWORD), &bytesWritten, NULL);
+                    
+                    // Примусовий запис і невелика пауза
+                    FlushFileBuffers(data->hPipe);    
+                }
+
+                // 6. Розрив з'єднання
+                DisconnectNamedPipe(data->hPipe);
             }
-            CancelIo(ps->hPipe);
+            CloseHandle(data->hPipe);
         }
+
+        delete data;
+        return 0;
     }
-    
-    void ProcessEvents(DWORD timeout = 100) {
-        if (!isRunning) return;
-        
-        std::vector<HANDLE> events;
-        std::vector<PerPipeStruct<T>*> eventPipes;
-        
-        events.push_back(hStopEvent);
-        
-        // Collecting all events
-        for (auto it = pipeList.begin(); it != pipeList.end(); ++it) {
-            PerPipeStruct<T>* ps = *it;
-            events.push_back(ps->overlap.hEvent);
-            eventPipes.push_back(ps);
-        }
-        
-        DWORD result = WaitForMultipleObjects(events.size(), events.data(), 
-                                              FALSE, timeout);
-        
-        if (result == WAIT_OBJECT_0) {
-            // Stop event
-            return;
-        }
-        
-        if (result > WAIT_OBJECT_0 && result < WAIT_OBJECT_0 + events.size()) {
-            int index = result - WAIT_OBJECT_0 - 1;
-            PerPipeStruct<T>* ps = eventPipes[index];
+
+public:
+    PipeServer() : isRunning(false) {}
+
+    void Start(int numPipes, UserList* uList, HWND hGui) {
+        isRunning = true;
+        for (int i = 0; i < numPipes; i++) {
+            PerPipeData* data = new PerPipeData;
+            data->pipeId = i + 1;
+            data->userList = uList;
+            data->hGui = hGui;
             
-            DWORD bytesTransferred;
-            BOOL success = GetOverlappedResult(ps->hPipe, &ps->overlap, 
-                                               &bytesTransferred, FALSE);
-            
-            if (!ps->connected) {
-                // Client connected
-                ps->connected = true;
-                if (onConnectCallback) {
-                    onConnectCallback(ps, callbackUserData);
-                }
-                
-                // Start reading data
-                ps->Reset();
-                ReadFile(ps->hPipe, ps->buffer, sizeof(ps->buffer) - 1, 
-                        NULL, &ps->overlap);
-                
-            } else if (success && bytesTransferred > 0) {
-                // Data received
-                ps->buffer[bytesTransferred] = '\0';
-                ps->bytesRead = bytesTransferred;
-                
-                if (onReadCallback) {
-                    onReadCallback(ps, callbackUserData);
-                }
-                
-            } else {
-                // Client disconnected or error
-                if (onDisconnectCallback) {
-                    onDisconnectCallback(ps, callbackUserData);
-                }
-                
-                DisconnectNamedPipe(ps->hPipe);
-                ps->connected = false;
-                ps->Reset();
-                
-                // Waiting for new connection
-                ConnectNamedPipe(ps->hPipe, &ps->overlap);
-            }
+            HANDLE hThread = CreateThread(NULL, 0, PipeInstanceThread, data, 0, NULL);
+            if (hThread) threads.push_back(hThread);
         }
+        Log(hGui, "Server ON. Pipe: " + string(PIPE_NAME));
     }
-    
-    void WriteResponse(PerPipeStruct<T>* ps, const char* data, DWORD size) {
-        DWORD bytesWritten;
-        WriteFile(ps->hPipe, data, size, &bytesWritten, NULL);
-        FlushFileBuffers(ps->hPipe);
-    }
-    
-    bool IsRunning() const { return isRunning; }
-    
-    int GetPipeCount() const { return pipeList.getSize(); }
 };
