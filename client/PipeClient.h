@@ -11,7 +11,7 @@ private:
     static const int BUFFER_SIZE = 512;
 
 public:
-    PipeClient(const std::string& name = "\\\\ServerName\\pipe\\AuthPipe");
+    PipeClient(const std::string& name = "\\\\.\\pipe\\AuthPipe");
     ~PipeClient();
 
     bool Connect(const std::string& computerName = ".");
@@ -22,6 +22,6 @@ public:
 
 private:
     bool SendData(const std::string& data);
-    bool ReceiveResponse(char& response);
+    bool ReceiveResponse(DWORD& response);
     bool Reconnect();
 };

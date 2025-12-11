@@ -21,9 +21,16 @@ private:
     bool protectionMode; // Режим захисту
     int maxLoginLen;
     int maxPassLen;
+    CRITICAL_SECTION blockedUsersLock; // Protects blockedUsers map
 
 public:
-    UserList() : protectionMode(false), maxLoginLen(0), maxPassLen(0) {}
+    UserList() : protectionMode(false), maxLoginLen(0), maxPassLen(0) {
+        InitializeCriticalSection(&blockedUsersLock);
+    }
+
+    ~UserList() {
+        DeleteCriticalSection(&blockedUsersLock);
+    }
 
     void SetProtection(bool enable) {
         protectionMode = enable;
@@ -75,27 +82,37 @@ public:
     int CheckUser(const string& login, const string& pass) {
         // 1. Перевірка блокування (Anti-Brute-Force)
         if (protectionMode) {
+            EnterCriticalSection(&blockedUsersLock);
+
             DWORD currentTime = GetTickCount();
             if (blockedUsers.count(login)) {
                 if (currentTime < blockedUsers[login]) {
+                    LeaveCriticalSection(&blockedUsersLock);
                     return -1; // Ігноруємо запит
                 } else {
                     blockedUsers.erase(login); // Час бану вийшов
                 }
             }
+
+            LeaveCriticalSection(&blockedUsersLock);
         }
 
         // 2. Пошук користувача
         for (const auto& u : users) {
             if (u.login == login) {
                 if (u.password == pass) {
-                    if (protectionMode) blockedUsers.erase(login);
+                    if (protectionMode) {
+                        EnterCriticalSection(&blockedUsersLock);
+                        blockedUsers.erase(login);
+                        LeaveCriticalSection(&blockedUsersLock);
+                    }
                     return 1; // Успіх
                 } else {
                     // Невірний пароль
                     if (protectionMode) {
-                        // Бан на 3 секунди (3000 мс)
-                        blockedUsers[login] = GetTickCount() + 3000;
+                        EnterCriticalSection(&blockedUsersLock);
+                        blockedUsers[login] = GetTickCount() + 3000; // Бан на 3 секунди
+                        LeaveCriticalSection(&blockedUsersLock);
                     }
                     return 0; // Пароль невірний
                 }

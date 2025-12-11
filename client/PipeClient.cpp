@@ -44,21 +44,31 @@ bool PipeClient::Connect(const std::string& computerName) {
 
 bool PipeClient::TryPassword(const std::string& login, const std::string& password) {
     if (!IsConnected()) {
-        std::cout << "[!] Not connected to server\n";
-        return false;
+        std::string target = lastComputerName.empty() ? "." : lastComputerName;
+        if (!Connect(target)) {
+            std::cout << "[!] Connection failed inside TryPassword\n";
+            return false;
+        }
     }
 
     std::string message = login + " " + password;
+    
     if (!SendData(message)) {
+        Disconnect();
         return false;
     }
 
-    char response;
+    DWORD response = 0;
     if (!ReceiveResponse(response)) {
+        Disconnect();
         return false;
     }
 
-    return (response == '1');
+    bool isSuccess = (response == 1);
+
+    Disconnect(); 
+
+    return isSuccess;
 }
 
 void PipeClient::Disconnect() {
@@ -123,13 +133,15 @@ bool PipeClient::SendData(const std::string& data) {
     return true;
 }
 
-bool PipeClient::ReceiveResponse(char& response) {
+bool PipeClient::ReceiveResponse(DWORD& response) {
     DWORD bytesRead;
-    if (!ReadFile(hPipe, &response, 1, &bytesRead, NULL)) {
+    // Читаємо sizeof(DWORD) (4 байти)
+    if (!ReadFile(hPipe, &response, sizeof(DWORD), &bytesRead, NULL)) {
         std::cout << "[!] ReadFile failed, attempting reconnection...\n";
         if (Reconnect()) {
             std::cout << "[*] Reconnected, retrying...\n";
-            if (!ReadFile(hPipe, &response, 1, &bytesRead, NULL)) {
+            // Тут теж читаємо sizeof(DWORD)
+            if (!ReadFile(hPipe, &response, sizeof(DWORD), &bytesRead, NULL)) {
                 std::cout << "[!] ReadFile failed after reconnection: " << GetLastErrorMsg() << "\n";
                 Disconnect();
                 return false;
@@ -140,8 +152,9 @@ bool PipeClient::ReceiveResponse(char& response) {
         }
     }
 
-    if (bytesRead != 1) {
-        std::cout << "[!] ReadFile read " << bytesRead << " bytes instead of 1\n";
+    // Перевіряємо, чи прочитали ми 4 байти
+    if (bytesRead != sizeof(DWORD)) {
+        std::cout << "[!] ReadFile read " << bytesRead << " bytes instead of " << sizeof(DWORD) << "\n";
         return false;
     }
 
