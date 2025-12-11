@@ -5,6 +5,7 @@
 #include <map>
 #include <fstream>
 #include <sstream>
+#include "ServerConstants.h"
 
 using namespace std;
 
@@ -19,13 +20,14 @@ private:
     vector<User> users;
     map<string, DWORD> blockedUsers; // Логін -> Час розблокування (GetTickCount)
     bool protectionMode; // Режим захисту
+    bool isServerRunning; // Track if server is using the user list
     int maxLoginLen;
     int maxPassLen;
     
     CRITICAL_SECTION blockedUsersLock; // Thread synchronization for blockedUsers map
 
 public:
-    UserList() : protectionMode(false), maxLoginLen(0), maxPassLen(0) {
+    UserList() : protectionMode(false), isServerRunning(false), maxLoginLen(0), maxPassLen(0) {
         InitializeCriticalSection(&blockedUsersLock);
     }
     
@@ -36,9 +38,24 @@ public:
     void SetProtection(bool enable) {
         protectionMode = enable;
     }
+    
+    void SetServerRunning(bool running) {
+        isServerRunning = running;
+    }
+    
+    bool IsServerRunning() const {
+        return isServerRunning;
+    }
 
     // Завантаження файлу через діалогове вікно
     bool Load(HWND hwnd) {
+        // Prevent loading while server is running to avoid race conditions
+        if (isServerRunning) {
+            MessageBoxA(hwnd, "Cannot load users while server is running!\nPlease stop the server first.", 
+                       "Server Running", MB_ICONWARNING | MB_OK);
+            return false;
+        }
+        
         OPENFILENAMEA ofn;
         char szFile[260] = { 0 };
 
@@ -52,29 +69,34 @@ public:
         ofn.Flags = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST;
 
         if (GetOpenFileNameA(&ofn) == TRUE) {
-            ifstream file(ofn.lpstrFile);
-            if (!file.is_open()) return false;
-
-            users.clear();
-            string line;
-
-            // Читаємо довжини (перший рядок)
-            if (getline(file, line)) {
-                stringstream ss(line);
-                ss >> maxLoginLen >> maxPassLen;
-            }
-
-            // Читаємо пари логін пароль
-            while (getline(file, line)) {
-                stringstream ss(line);
-                string l, p;
-                if (ss >> l >> p) {
-                    users.push_back({ l, p });
-                }
-            }
-            return true;
+            return LoadFromFile(ofn.lpstrFile);
         }
         return false;
+    }
+    
+    // Separated file loading logic for better testability and reusability
+    bool LoadFromFile(const string& filepath) {
+        ifstream file(filepath);
+        if (!file.is_open()) return false;
+
+        users.clear();
+        string line;
+
+        // Читаємо довжини (перший рядок)
+        if (getline(file, line)) {
+            stringstream ss(line);
+            ss >> maxLoginLen >> maxPassLen;
+        }
+
+        // Читаємо пари логін пароль
+        while (getline(file, line)) {
+            stringstream ss(line);
+            string l, p;
+            if (ss >> l >> p) {
+                users.push_back({ l, p });
+            }
+        }
+        return true;
     }
 
     size_t Count() const { return users.size(); }
@@ -112,7 +134,7 @@ public:
                     // Невірний пароль
                     if (protectionMode) {
                         EnterCriticalSection(&blockedUsersLock);
-                        blockedUsers[login] = GetTickCount() + 3000; // Бан на 3 секунди
+                        blockedUsers[login] = GetTickCount() + ServerConfig::BLOCK_DURATION_MS;
                         LeaveCriticalSection(&blockedUsersLock);
                     }
                     return 0; // Пароль невірний

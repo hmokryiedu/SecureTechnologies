@@ -2,6 +2,8 @@
 #include <string>
 #include "list.h"
 #include "PipeServer.h"
+#include "ServerContext.h"
+#include "ServerConstants.h"
 
 // Ідентифікатори для кнопок
 #define IDC_LOAD_BTN 101
@@ -9,11 +11,11 @@
 #define IDC_PROTECT_CHK 103
 #define IDC_LOG_LIST 104
 
-UserList g_Users;
-PipeServer g_Server;
-
 // Функція обробки повідомлень вікна
 LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
+    // Retrieve ServerContext from window user data
+    ServerContext* context = reinterpret_cast<ServerContext*>(GetWindowLongPtr(hwnd, GWLP_USERDATA));
+    
     switch (uMsg) {
     case WM_CREATE:
         // Кнопка завантаження файлу
@@ -35,31 +37,33 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         break;
 
     case WM_COMMAND:
-        switch (LOWORD(wParam)) {
-        case IDC_LOAD_BTN:
-            if (g_Users.Load(hwnd)) {
-                string msg = "Loaded " + to_string(g_Users.Count()) + " users.";
-                SendDlgItemMessage(hwnd, IDC_LOG_LIST, LB_ADDSTRING, 0, (LPARAM)msg.c_str());
-            }
-            break;
+        if (context) {
+            switch (LOWORD(wParam)) {
+            case IDC_LOAD_BTN:
+                if (context->GetUsers().Load(hwnd)) {
+                    string msg = "Loaded " + to_string(context->GetUsers().Count()) + " users.";
+                    SendDlgItemMessage(hwnd, IDC_LOG_LIST, LB_ADDSTRING, 0, (LPARAM)msg.c_str());
+                }
+                break;
 
-        case IDC_PROTECT_CHK:
-            {
-                BOOL checked = IsDlgButtonChecked(hwnd, IDC_PROTECT_CHK);
-                g_Users.SetProtection(checked == BST_CHECKED);
-                SendDlgItemMessage(hwnd, IDC_LOG_LIST, LB_ADDSTRING, 0, 
-                    (LPARAM)(checked ? "Protection ON" : "Protection OFF"));
-            }
-            break;
+            case IDC_PROTECT_CHK:
+                {
+                    BOOL checked = IsDlgButtonChecked(hwnd, IDC_PROTECT_CHK);
+                    context->GetUsers().SetProtection(checked == BST_CHECKED);
+                    SendDlgItemMessage(hwnd, IDC_LOG_LIST, LB_ADDSTRING, 0, 
+                        (LPARAM)(checked ? "Protection ON" : "Protection OFF"));
+                }
+                break;
 
-        case IDC_START_BTN:
-            if (g_Users.Count() == 0) {
-                MessageBox(hwnd, "Please load users file first!", "Error", MB_ICONERROR);
-            } else {
-                g_Server.Start(16, &g_Users, hwnd); // 16 concurrent pipes for multithreaded clients
-                EnableWindow(GetDlgItem(hwnd, IDC_START_BTN), FALSE); // Блокуємо кнопку
+            case IDC_START_BTN:
+                if (context->GetUsers().Count() == 0) {
+                    MessageBox(hwnd, "Please load users file first!", "Error", MB_ICONERROR);
+                } else {
+                    context->GetServer().Start(ServerConfig::MAX_CONCURRENT_PIPES, &context->GetUsers(), hwnd);
+                    EnableWindow(GetDlgItem(hwnd, IDC_START_BTN), FALSE); // Блокуємо кнопку
+                }
+                break;
             }
-            break;
         }
         break;
 
@@ -75,7 +79,10 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         break;
 
     case WM_DESTROY:
-        g_Server.Stop();  // Graceful thread cleanup
+        if (context) {
+            context->GetServer().Stop();  // Graceful thread cleanup
+            delete context;  // Clean up context
+        }
         PostQuitMessage(0);
         break;
 
@@ -103,6 +110,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         NULL, NULL, hInstance, NULL);
 
     if (hwnd == NULL) return 0;
+
+    // Create and attach ServerContext to window
+    ServerContext* context = new ServerContext();
+    SetWindowLongPtr(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(context));
 
     ShowWindow(hwnd, nCmdShow);
 

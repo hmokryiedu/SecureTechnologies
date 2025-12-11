@@ -4,9 +4,10 @@
 #include <vector>
 #include <sstream>
 #include "PerPipeStruct.h"
+#include "ServerConstants.h"
 
 #define PIPE_NAME "\\\\.\\pipe\\AuthPipe" 
-#define BUFFER_SIZE 512
+#define BUFFER_SIZE ServerConfig::PIPE_BUFFER_SIZE
 
 using namespace std;
 
@@ -15,6 +16,7 @@ private:
     vector<HANDLE> threads;
     bool isRunning;
     HANDLE hShutdownEvent;  // Event for graceful thread shutdown
+    UserList* userList;     // Store reference to unlock on stop
 
     // Fixed memory leak: Using SendMessage instead of PostMessage with dynamic allocation
     static void Log(HWND hGui, const string& text) {
@@ -112,7 +114,7 @@ private:
 
                 if (res == -1) {
                     Log(data->GetGui(), "[PROTECT] Ignored: " + loginStr);
-                    Sleep(1000);
+                    Sleep(ServerConfig::RETRY_DELAY_MS);
                     replyValue = 0;
                 }
                 else if (res == 1) {
@@ -161,10 +163,12 @@ private:
     }
 
 public:
-    PipeServer() : isRunning(false), hShutdownEvent(NULL) {}
+    PipeServer() : isRunning(false), hShutdownEvent(NULL), userList(nullptr) {}
 
     void Start(int numPipes, UserList* uList, HWND hGui) {
         isRunning = true;
+        userList = uList;
+        userList->SetServerRunning(true);
         
         // Create shutdown event (manual-reset, initially non-signaled)
         hShutdownEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
@@ -187,13 +191,13 @@ public:
             // Signal all threads to exit
             SetEvent(hShutdownEvent);
             
-            // Wait for all threads to finish (5 second timeout)
+            // Wait for all threads to finish
             if (threads.size() > 0) {
                 DWORD result = WaitForMultipleObjects(
                     (DWORD)threads.size(),
                     threads.data(),
                     TRUE,  // Wait for all
-                    5000   // 5 second timeout
+                    ServerConfig::SHUTDOWN_TIMEOUT_MS
                 );
                 
                 if (result == WAIT_TIMEOUT) {
@@ -209,6 +213,12 @@ public:
             
             CloseHandle(hShutdownEvent);
             hShutdownEvent = NULL;
+        }
+        
+        // Allow user list to be modified again
+        if (userList) {
+            userList->SetServerRunning(false);
+            userList = nullptr;
         }
     }
     
