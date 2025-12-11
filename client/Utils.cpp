@@ -4,6 +4,36 @@
 #include <sstream>
 #include <cmath>
 
+// ============= Windows Error Helper =============
+
+std::string GetWin32ErrorMessage(DWORD errorCode) {
+    char* messageBuffer = nullptr;
+
+    DWORD size = FormatMessageA(
+        FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+        NULL,
+        errorCode,
+        MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT),
+        (LPSTR)&messageBuffer,
+        0,
+        NULL
+    );
+
+    std::string message;
+    if (size > 0 && messageBuffer) {
+        message = std::string(messageBuffer, size);
+        // Remove trailing newlines
+        while (!message.empty() && (message.back() == '\n' || message.back() == '\r')) {
+            message.pop_back();
+        }
+        LocalFree(messageBuffer);
+    } else {
+        message = "Unknown error " + std::to_string(errorCode);
+    }
+
+    return message;
+}
+
 // ============= Timer Implementation =============
 
 Timer::Timer() : isRunning(false) {

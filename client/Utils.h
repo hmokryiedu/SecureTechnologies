@@ -3,6 +3,7 @@
 #include <string>
 #include <chrono>
 #include <iostream>
+#include <windows.h>
 
 class Timer {
 private:
@@ -36,6 +37,9 @@ public:
     double GetAttemptsPerSecond() const;
     std::string GetStats() const;
 };
+
+// Windows error message helper
+std::string GetWin32ErrorMessage(DWORD errorCode);
 
 namespace Console {
     void ClearLine();

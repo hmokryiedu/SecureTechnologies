@@ -95,3 +95,40 @@ bool BruteForceGenerator::IncrementPassword() {
 
     return false;
 }
+
+// Get password at specific index for multithreading
+std::string BruteForceGenerator::GetPasswordAtIndex(unsigned long long index) const {
+    if (index == 0 || index > totalCombinations) {
+        return "";
+    }
+
+    int alphabetSize = (int)alphabet.length();
+    unsigned long long currentIndex = 0;
+    
+    // Find which length group this index belongs to
+    for (int len = 1; len <= maxLength; len++) {
+        unsigned long long combosForThisLength = 1;
+        for (int i = 0; i < len; i++) {
+            combosForThisLength *= alphabetSize;
+        }
+        
+        if (currentIndex + combosForThisLength >= index) {
+            // This is the right length
+            unsigned long long offsetInLength = index - currentIndex - 1;
+            
+            // Generate password of this length at this offset
+            std::string result(len, alphabet[0]);
+            
+            for (int pos = len - 1; pos >= 0; pos--) {
+                result[pos] = alphabet[offsetInLength % alphabetSize];
+                offsetInLength /= alphabetSize;
+            }
+            
+            return result;
+        }
+        
+        currentIndex += combosForThisLength;
+    }
+    
+    return "";
+}

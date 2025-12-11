@@ -1,15 +1,25 @@
 #include <iostream>
 #include <iomanip>
+#include <thread>
+#include <atomic>
+#include <mutex>
+#include <vector>
 #include "PipeClient.h"
 #include "BruteForce.h"
 #include "RuleAttack.h"
 #include "Utils.h"
 
+// Global shared state for multithreading
+std::atomic<bool> g_passwordFound(false);
+std::atomic<unsigned long long> g_totalAttempts(0);
+std::mutex g_consoleMutex;
+std::string g_foundPassword;
+
 // Forward declarations
 void ShowMainMenu();
 void ModeConnectionTest();
-void ModeBruteForce();
-void ModeRuleBasedAttack();
+void ModeBruteForceMultithreaded();
+void ModeRuleBasedAttackMultithreaded();
 
 // Pause and wait for Enter key
 void Pause() {
@@ -21,7 +31,7 @@ int main() {
     int choice = 0;
     while (true) {
         ShowMainMenu();
-        std::cout << "\nEnter your choice (1-3, 0 to exit): ";
+        std::cout << "\nEnter your choice (0-3): ";
         std::cin >> choice;
         std::cin.ignore(10000, '\n');
 
@@ -30,10 +40,10 @@ int main() {
                 ModeConnectionTest();
                 break;
             case 2:
-                ModeBruteForce();
+                ModeBruteForceMultithreaded();
                 break;
             case 3:
-                ModeRuleBasedAttack();
+                ModeRuleBasedAttackMultithreaded();
                 break;
             case 0:
                 Console::PrintInfo("Exiting...");
@@ -53,9 +63,11 @@ int main() {
 
 void ShowMainMenu() {
     Console::PrintSeparator('=', 70);
-    std::cout << " 1. Connection Test     - Test connectivity and single credential\n";
-    std::cout << " 2. Brute Force Attack  - Try all possible character combinations\n";
-    std::cout << " 3. Dictionary Attack   - Test passwords from file with rules\n";
+    std::cout << " PASSWORD CRACKING CLIENT (140% Grade - Multithreaded)\n";
+    Console::PrintSeparator('=', 70);
+    std::cout << " 1. Connection Test       - Verify server connectivity\n";
+    std::cout << " 2. Brute Force Attack    - Try all combinations (multithreaded)\n";
+    std::cout << " 3. Dictionary Attack     - Rule-based attack (multithreaded)\n";
     std::cout << " 0. Exit\n";
     Console::PrintSeparator('=', 70);
 }
@@ -316,4 +328,306 @@ void ModeRuleBasedAttack() {
 
     client.Disconnect();
     Console::PrintInfo("Disconnected from server");
+}
+
+// ============= Worker Thread for Brute Force =============
+
+void BruteForceWorkerThread(
+    int threadId,
+    unsigned long long startIndex,
+    unsigned long long endIndex,
+    const std::string& login,
+    const std::string& alphabet,
+    int maxLength
+) {
+    PipeClient client;
+    if (!client.Connect()) {
+        std::lock_guard<std::mutex> lock(g_consoleMutex);
+        Console::PrintError("Thread " + std::to_string(threadId) + " failed to connect");
+        return;
+    }
+
+    BruteForceGenerator generator(alphabet, maxLength);
+
+    for (unsigned long long i = startIndex; i < endIndex; i++) {
+        if (g_passwordFound.load()) {
+            client.Disconnect();
+            return;
+        }
+
+        std::string password = generator.GetPasswordAtIndex(i);
+        if (password.empty()) continue;
+
+        if (client.TryPassword(login, password)) {
+            g_passwordFound.store(true);
+            g_foundPassword = password;
+            
+            std::lock_guard<std::mutex> lock(g_consoleMutex);
+            Console::ClearLine();
+            Console::PrintSuccess("Thread " + std::to_string(threadId) + " found password: " + password);
+            client.Disconnect();
+            return;
+        }
+
+        g_totalAttempts.fetch_add(1);
+
+        if (i % 100 == 0) {
+            std::lock_guard<std::mutex> lock(g_consoleMutex);
+            Console::ClearLine();
+            std::cout << "Thread " << threadId << " progress: " 
+                      << (i - startIndex) << "/" << (endIndex - startIndex)
+                      << " | Total attempts: " << g_totalAttempts.load();
+            std::cout.flush();
+        }
+    }
+
+    client.Disconnect();
+}
+
+// ============= Mode 4: Multithreaded Brute Force =============
+
+void ModeBruteForceMultithreaded() {
+    Console::PrintHeader("MULTITHREADED BRUTE FORCE ATTACK");
+
+    // Select alphabet
+    int alphabetChoice = 0;
+    std::cout << "\nSelect alphabet:\n";
+    std::cout << " 1. Lowercase + '      (27 characters)\n";
+    std::cout << " 2. Letters + Digits + ' (63 characters)\n";
+    std::cout << " 3. Full Alphabet      (128 characters)\n";
+    std::cout << "Enter choice (1-3): ";
+    std::cin >> alphabetChoice;
+    std::cin.ignore(10000, '\n');
+
+    std::string alphabet;
+    switch (alphabetChoice) {
+        case 1:
+            alphabet = "abcdefghijklmnopqrstuvwxyz'";
+            break;
+        case 2:
+            alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789'";
+            break;
+        case 3:
+            alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+                      "АБВГДЕЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯабвгдежзийклмнопрстуфхцчшщъыьэюя'";
+            break;
+        default:
+            Console::PrintError("Invalid choice!");
+            return;
+    }
+
+    int maxLength = 0;
+    std::cout << "Enter maximum password length (1-20): ";
+    std::cin >> maxLength;
+    std::cin.ignore(10000, '\n');
+
+    if (maxLength < 1 || maxLength > 20) {
+        Console::PrintError("Invalid length!");
+        return;
+    }
+
+    std::string targetLogin;
+    std::cout << "Enter login to crack: ";
+    std::getline(std::cin, targetLogin);
+
+    // Determine number of threads
+    int numThreads = std::thread::hardware_concurrency();
+    if (numThreads == 0) numThreads = 4;
+
+    std::cout << "\nUse how many threads? (Available: " << numThreads << "): ";
+    int userThreads = 0;
+    std::cin >> userThreads;
+    std::cin.ignore(10000, '\n');
+
+    if (userThreads > 0 && userThreads <= 64) {
+        numThreads = userThreads;
+    }
+
+    BruteForceGenerator tempGen(alphabet, maxLength);
+    unsigned long long totalCombos = tempGen.GetTotalCombinations();
+
+    Console::PrintInfo("Starting multithreaded attack...");
+    std::cout << "Threads:      " << numThreads << "\n";
+    std::cout << "Target:       " << targetLogin << "\n";
+    std::cout << "Alphabet:     " << alphabet.length() << " characters\n";
+    std::cout << "Max length:   " << maxLength << "\n";
+    std::cout << "Total combos: " << totalCombos << "\n\n";
+
+    // Reset global state
+    g_passwordFound.store(false);
+    g_totalAttempts.store(0);
+    g_foundPassword.clear();
+
+    Timer timer;
+    timer.Start();
+
+    std::vector<std::thread> threads;
+    unsigned long long chunkSize = totalCombos / numThreads;
+
+    for (int i = 0; i < numThreads; i++) {
+        unsigned long long start = i * chunkSize + 1;
+        unsigned long long end = (i == numThreads - 1) ? totalCombos + 1 : start + chunkSize;
+
+        threads.emplace_back(BruteForceWorkerThread, i, start, end, 
+                           targetLogin, alphabet, maxLength);
+    }
+
+    for (auto& thread : threads) {
+        thread.join();
+    }
+
+    timer.Stop();
+
+    Console::ClearLine();
+    if (g_passwordFound.load()) {
+        Console::PrintSuccess("PASSWORD FOUND!");
+        std::cout << "\n";
+        Console::PrintSeparator('=', 70);
+        std::cout << "Login:        " << targetLogin << "\n";
+        std::cout << "Password:     " << g_foundPassword << "\n";
+        std::cout << "Threads:      " << numThreads << "\n";
+        std::cout << "Total attempts: " << g_totalAttempts.load() << "\n";
+        std::cout << "Time:         " << timer.GetElapsedFormatted() << "\n";
+        std::cout << "Rate:         " << std::fixed << std::setprecision(1);
+        unsigned long long elapsed = timer.GetElapsed();
+        if (elapsed > 0) {
+            std::cout << (g_totalAttempts.load() * 1000.0 / elapsed) << " passwords/second\n";
+        }
+        Console::PrintSeparator('=', 70);
+    } else {
+        Console::PrintWarning("Password not found!");
+        std::cout << "Tested " << g_totalAttempts.load() << " passwords in "
+                  << timer.GetElapsedFormatted() << "\n";
+    }
+}
+
+// ============= Mode 5: Multithreaded Dictionary Attack =============
+
+void ModeRuleBasedAttackMultithreaded() {
+    Console::PrintHeader("MULTITHREADED DICTIONARY ATTACK");
+
+    RuleBasedAttack attack;
+
+    Console::PrintInfo("Select dictionary file...");
+    if (!attack.LoadDictionaryFromFile()) {
+        Console::PrintError("No file selected or failed to open!");
+        return;
+    }
+
+    Console::PrintSuccess("Dictionary loaded: " + std::to_string(attack.GetDictionarySize()) + " entries");
+
+    Console::PrintInfo("Generating password variants with rules...");
+    attack.GenerateVariants();
+    Console::PrintSuccess("Generated " + std::to_string(attack.GetVariantCount()) + " password variants");
+
+    std::string targetLogin;
+    std::cout << "Enter login to crack: ";
+    std::getline(std::cin, targetLogin);
+
+    int numThreads = std::thread::hardware_concurrency();
+    if (numThreads == 0) numThreads = 4;
+
+    std::cout << "\nUse how many threads? (Available: " << numThreads << "): ";
+    int userThreads = 0;
+    std::cin >> userThreads;
+    std::cin.ignore(10000, '\n');
+
+    if (userThreads > 0 && userThreads <= 64) {
+        numThreads = userThreads;
+    }
+
+    size_t totalVariants = attack.GetVariantCount();
+
+    Console::PrintInfo("Starting multithreaded dictionary attack...");
+    std::cout << "Threads:  " << numThreads << "\n";
+    std::cout << "Target:   " << targetLogin << "\n";
+    std::cout << "Variants: " << totalVariants << "\n\n";
+
+    // Reset global state
+    g_passwordFound.store(false);
+    g_totalAttempts.store(0);
+    g_foundPassword.clear();
+
+    Timer timer;
+    timer.Start();
+
+    std::vector<std::thread> threads;
+    size_t chunkSize = totalVariants / numThreads;
+
+    // Simple approach: each thread tests a range of the variants
+    for (int i = 0; i < numThreads; i++) {
+        size_t start = i * chunkSize;
+        size_t end = (i == numThreads - 1) ? totalVariants : start + chunkSize;
+
+        threads.emplace_back([i, start, end, &targetLogin, &attack]() {
+            PipeClient client;
+            if (!client.Connect()) {
+                std::lock_guard<std::mutex> lock(g_consoleMutex);
+                Console::PrintError("Thread " + std::to_string(i) + " failed to connect");
+                return;
+            }
+
+            for (size_t idx = start; idx < end; idx++) {
+                if (g_passwordFound.load()) {
+                    client.Disconnect();
+                    return;
+                }
+
+                // Access variant by index - LinkedList supports operator[]
+                std::string password = attack.GetVariantAtIndex(idx);
+
+                if (client.TryPassword(targetLogin, password)) {
+                    g_passwordFound.store(true);
+                    g_foundPassword = password;
+                    
+                    std::lock_guard<std::mutex> lock(g_consoleMutex);
+                    Console::ClearLine();
+                    Console::PrintSuccess("Thread " + std::to_string(i) + " found password: " + password);
+                    client.Disconnect();
+                    return;
+                }
+
+                g_totalAttempts.fetch_add(1);
+
+                if (idx % 100 == 0) {
+                    std::lock_guard<std::mutex> lock(g_consoleMutex);
+                    Console::ClearLine();
+                    std::cout << "Thread " << i << " progress: " 
+                              << (idx - start) << "/" << (end - start)
+                              << " | Total: " << g_totalAttempts.load();
+                    std::cout.flush();
+                }
+            }
+
+            client.Disconnect();
+        });
+    }
+
+    for (auto& thread : threads) {
+        thread.join();
+    }
+
+    timer.Stop();
+
+    Console::ClearLine();
+    if (g_passwordFound.load()) {
+        Console::PrintSuccess("PASSWORD FOUND!");
+        std::cout << "\n";
+        Console::PrintSeparator('=', 70);
+        std::cout << "Login:        " << targetLogin << "\n";
+        std::cout << "Password:     " << g_foundPassword << "\n";
+        std::cout << "Threads:      " << numThreads << "\n";
+        std::cout << "Total attempts: " << g_totalAttempts.load() << "\n";
+        std::cout << "Time:         " << timer.GetElapsedFormatted() << "\n";
+        std::cout << "Rate:         " << std::fixed << std::setprecision(1);
+        unsigned long long elapsed = timer.GetElapsed();
+        if (elapsed > 0) {
+            std::cout << (g_totalAttempts.load() * 1000.0 / elapsed) << " passwords/second\n";
+        }
+        Console::PrintSeparator('=', 70);
+    } else {
+        Console::PrintWarning("Password not found!");
+        std::cout << "Tested " << g_totalAttempts.load() << " passwords in "
+                  << timer.GetElapsedFormatted() << "\n";
+    }
 }

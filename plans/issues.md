@@ -16,15 +16,19 @@ This document provides a comprehensive analysis of gaps between the Laboratory W
 | Grade Level | Requirements | Status | Blocking Issues |
 |-------------|--------------|--------|-----------------|
 | **75%** | Brute-force attack + Basic server | ✅ **COMPLETE** | None |
-| **100%** | Rule-based attack + Anti-cracking + Templated linked list | ⚠️ **PARTIAL** | #1, #2, #3 |
+| **100%** | Rule-based attack + Anti-cracking + Templated linked list + OOP | ⚠️ **PARTIAL** | #1, #2, #3, #5, #11 |
 | **140%** | Multithreading (client + server) + 60%+ crack rate | ⚠️ **PARTIAL** | #4 |
 
 ### Issue Summary
 
-- **Total Issues Identified:** 10
-- **Critical (Requirements Non-Compliance):** 5 issues
+- **Total Issues Identified:** 12
+- **Critical (Requirements Non-Compliance):** 7 issues (#1, #2, #3, #4, #5, #11 + #5b resolved)
 - **High Severity (Code Quality):** 3 issues
 - **Medium Severity (Performance & Reliability):** 2 issues
+
+### Recent Updates (2025-12-11)
+- **Issue #5 ADDED:** Race condition on `blockedUsers` map - CRITICAL bug blocking 100% grade
+- **Issue #5b RESOLVED:** Async/Overlapped I/O now implemented in PipeServer.h
 
 ---
 
@@ -513,125 +517,839 @@ g++ -g client/main.cpp client/PipeClient.cpp client/BruteForce.cpp client/RuleAt
 
 ---
 
-### Issue #5: Server NOT Using Async/Overlapped Pipes
+### Issue #5: Race Condition on blockedUsers Map (CRITICAL BUG)
 
-**Severity:** MEDIUM (Best Practice Recommendation)
-**Requirement:** requirements.md Section 6
-**Grade Impact:** Minor (recommendation, not strict requirement)
+**Severity:** CRITICAL (Thread Safety Bug)
+**Requirement:** requirements.md Section 3.A.4 (Anti-Cracking Protection)
+**Grade Impact:** Blocks 100% grade - Anti-cracking protection is broken
 
 #### Requirement Statement
-> "Create at least 3 instances of a Named Pipe (Async/Overlapped mode recommended).
-> Use `FILE_FLAG_OVERLAPPED` for async."
+> "Implement an artificial delay (or request skipping) for a specific login after repeated failures.
+> **Constraint:** This delay must **not** freeze the whole server; other clients must still be served instantly."
 
 #### Current Implementation
-- **CreateNamedPipeA() flags:** Using `0` instead of `FILE_FLAG_OVERLAPPED` (PipeServer.h:38)
-- **I/O operations:** Synchronous blocking ReadFile/WriteFile
-- **Workaround:** Multiple threads provide concurrency
-- **Compliance:** ⚠️ **NOT RECOMMENDED** - Functional but not following best practice
+- **Multithreading:** ✅ Server creates 3 worker threads (PipeServer.h:166)
+- **Async I/O:** ✅ Uses `FILE_FLAG_OVERLAPPED` (PipeServer.h:43)
+- **Thread Synchronization:** ❌ **MISSING** - `blockedUsers` map accessed without locks
 
-#### Current Code
+#### Problem Location
 ```cpp
-// PipeServer.h:32-38
-data->hPipe = CreateNamedPipeA(
-    PIPE_NAME,
-    PIPE_ACCESS_DUPLEX,
-    PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
-    PIPE_UNLIMITED_INSTANCES,
-    BUFFER_SIZE, BUFFER_SIZE,
-    0,        // ← Should be FILE_FLAG_OVERLAPPED
-    NULL);
+// list.h:20 - Shared data structure
+map<string, DWORD> blockedUsers; // ← Accessed by 3 threads WITHOUT synchronization!
+
+// list.h:75-105 - CheckUser() method (UNSAFE)
+int CheckUser(const string& login, const string& pass) {
+    if (protectionMode) {
+        DWORD currentTime = GetTickCount();
+        if (blockedUsers.count(login)) {        // ⚠️ UNSAFE READ
+            if (currentTime < blockedUsers[login]) {
+                return -1;
+            } else {
+                blockedUsers.erase(login);       // ⚠️ UNSAFE WRITE
+            }
+        }
+    }
+    // ...
+    if (protectionMode) blockedUsers.erase(login);           // ⚠️ UNSAFE WRITE
+    // ...
+    if (protectionMode) blockedUsers[login] = GetTickCount() + 3000;  // ⚠️ UNSAFE WRITE
+}
 ```
 
+#### Why This Is Critical
+
+**Race Condition Scenario:**
+```
+Thread 1 (Client A):                     Thread 2 (Client B):
+------------------------                 ------------------------
+blockedUsers.count("admin")              
+                                         blockedUsers["admin"] = time+3000
+blockedUsers["admin"] ← CORRUPTED!       
+```
+
+**Consequences:**
+1. **Map corruption:** `std::map` is NOT thread-safe for concurrent modification
+2. **Iterator invalidation:** One thread erasing while another reads → crash
+3. **Undefined behavior:** C++ standard makes no guarantees for concurrent access
+4. **Anti-cracking fails:** Protection mode may not work correctly
+5. **Server crashes:** Segmentation faults under load
+
 #### Impact
-- Not following Microsoft's recommended approach for scalable pipe servers
-- Less efficient resource usage compared to async I/O
-- Threads block during I/O operations (wasted CPU cycles)
-- However: Current implementation is functional and meets baseline requirements
+- **Requirement violation:** Anti-cracking protection is unreliable (requirements.md:39-41)
+- **100% grade blocked:** Anti-cracking mode is mandatory for 100% grade
+- **Server instability:** Random crashes under concurrent client attacks
+- **Data corruption:** Block times may be incorrect or lost
 
 #### Files to Modify
 ```
-C:\Users\glebm\projects\tech-safety\brute-force\PipeServer.h (lines 32-38, 53, 81)
+C:\Users\glebm\projects\tech-safety\brute-force\list.h (lines 20-26, 75-105)
 ```
 
 #### Implementation Plan
 
-**Step 1: Add FILE_FLAG_OVERLAPPED to CreateNamedPipe**
+**Step 1: Add CRITICAL_SECTION Member Variable (after line 23)**
 ```cpp
-// PipeServer.h:38 - Change 7th parameter:
-data->hPipe = CreateNamedPipeA(
-    PIPE_NAME,
-    PIPE_ACCESS_DUPLEX,
-    PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
-    PIPE_UNLIMITED_INSTANCES,
-    BUFFER_SIZE, BUFFER_SIZE,
-    FILE_FLAG_OVERLAPPED,  // ← Add this flag
-    NULL);
+class UserList {
+private:
+    // ... existing members ...
+    map<string, DWORD> blockedUsers;
+    bool protectionMode;
+    int maxLoginLen;
+    int maxPassLen;
+    
+    CRITICAL_SECTION blockedUsersLock; // ← ADD THIS: Protects blockedUsers map
 ```
 
-**Step 2: Create OVERLAPPED Structures**
+**Step 2: Initialize Lock in Constructor (line 26)**
 ```cpp
-// In PipeThreadFunc(), before ConnectNamedPipe:
-OVERLAPPED connectOverlap = {0};
-connectOverlap.hEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
+// BEFORE:
+UserList() : protectionMode(false), maxLoginLen(0), maxPassLen(0) {}
 
-OVERLAPPED readOverlap = {0};
-readOverlap.hEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
-
-OVERLAPPED writeOverlap = {0};
-writeOverlap.hEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
-```
-
-**Step 3: Convert ConnectNamedPipe to Async**
-```cpp
-// Replace synchronous ConnectNamedPipe:
-BOOL connected = ConnectNamedPipe(data->hPipe, &connectOverlap);
-if (!connected) {
-    DWORD error = GetLastError();
-    if (error == ERROR_IO_PENDING) {
-        // Wait for connection
-        WaitForSingleObject(connectOverlap.hEvent, INFINITE);
-    } else if (error != ERROR_PIPE_CONNECTED) {
-        // Error handling
-        continue;
-    }
+// AFTER:
+UserList() : protectionMode(false), maxLoginLen(0), maxPassLen(0) {
+    InitializeCriticalSection(&blockedUsersLock);
 }
 ```
 
-**Step 4: Convert ReadFile to Async**
+**Step 3: Add Destructor for Cleanup**
 ```cpp
-// Replace synchronous ReadFile (line 53):
-DWORD bytesRead;
-BOOL success = ReadFile(data->hPipe, buffer, BUFFER_SIZE - 1, &bytesRead, &readOverlap);
-
-if (!success) {
-    DWORD error = GetLastError();
-    if (error == ERROR_IO_PENDING) {
-        // Wait for read completion
-        WaitForSingleObject(readOverlap.hEvent, INFINITE);
-        GetOverlappedResult(data->hPipe, &readOverlap, &bytesRead, FALSE);
-    } else {
-        // Error handling
-        continue;
-    }
+~UserList() {
+    DeleteCriticalSection(&blockedUsersLock);
 }
 ```
 
-**Step 5: Convert WriteFile to Async** (Similar to ReadFile)
-
-**Step 6: Cleanup Event Handles**
+**Step 4: Protect CheckUser() Method (lines 75-105)**
 ```cpp
-// At end of thread loop iteration:
-CloseHandle(connectOverlap.hEvent);
-CloseHandle(readOverlap.hEvent);
-CloseHandle(writeOverlap.hEvent);
+int CheckUser(const string& login, const string& pass) {
+    // 1. Check if user is blocked (Anti-Brute-Force)
+    if (protectionMode) {
+        EnterCriticalSection(&blockedUsersLock); // 🔒 LOCK
+
+        DWORD currentTime = GetTickCount();
+        if (blockedUsers.count(login)) {
+            if (currentTime < blockedUsers[login]) {
+                LeaveCriticalSection(&blockedUsersLock); // 🔓 UNLOCK
+                return -1; // Still blocked
+            } else {
+                blockedUsers.erase(login); // Block expired
+            }
+        }
+
+        LeaveCriticalSection(&blockedUsersLock); // 🔓 UNLOCK
+    }
+
+    // 2. Search for user and validate password
+    for (const auto& u : users) {
+        if (u.login == login) {
+            if (u.password == pass) {
+                if (protectionMode) {
+                    EnterCriticalSection(&blockedUsersLock); // 🔒 LOCK
+                    blockedUsers.erase(login);
+                    LeaveCriticalSection(&blockedUsersLock); // 🔓 UNLOCK
+                }
+                return 1; // Success
+            } else {
+                if (protectionMode) {
+                    EnterCriticalSection(&blockedUsersLock); // 🔒 LOCK
+                    blockedUsers[login] = GetTickCount() + 3000; // Block 3 sec
+                    LeaveCriticalSection(&blockedUsersLock); // 🔓 UNLOCK
+                }
+                return 0; // Wrong password
+            }
+        }
+    }
+    return 0; // User not found
+}
 ```
 
-**Step 7: Testing**
-- Test with multiple simultaneous client connections
-- Verify no regression in functionality
-- Monitor CPU usage: Async I/O should reduce blocking time
+#### Design Decisions
 
-**Note:** This is an enhancement, not critical for grading. Current synchronous implementation is acceptable for educational purposes.
+1. **Why CRITICAL_SECTION?**
+   - Fast (optimized for same-process threads)
+   - Simple (single lock = no deadlocks)
+   - Windows native (matches rest of codebase)
+   - Low contention (only 3 threads)
+
+2. **Why 3 separate lock acquisitions?**
+   - First lock: Check if blocked
+   - Second lock: Clear block on success
+   - Third lock: Add block on failure
+   - **Benefit:** Minimizes lock hold time = better concurrency
+
+3. **Why NOT lock the users vector?**
+   - `users` vector is read-only after initialization
+   - `Load()` is called before server starts (single-threaded)
+   - No synchronization needed for read-only data
+
+#### Testing Plan
+
+| Test | Description | Expected Result |
+|------|-------------|-----------------|
+| Test 1 | Single-client protection mode | Block works, timeout works, clear on success |
+| Test 2 | Concurrent attacks on SAME login | No crashes, both see -1 or 0 correctly |
+| Test 3 | Concurrent attacks on DIFFERENT logins | Each login blocked independently |
+| Test 4 | Stress test (1 hour) | No hangs, no crashes, no deadlocks |
+| Test 5 | Performance measurement | <1% overhead from locking |
+
+#### Compliance After Fix
+
+| Requirement | Before | After |
+|-------------|--------|-------|
+| "Delay must not freeze server" (req:39-41) | 🔴 **BUG** (race breaks this) | ✅ **FIXED** |
+| "Anti-cracking mode" (req:82) | 🔴 **BUG** (not thread-safe) | ✅ **FIXED** |
+| 100% grade | 🔴 **BLOCKED** | ✅ **COMPLETE** |
+
+**Estimated Effort:** 30 min implementation + 1-2 hours testing = ~2 hours total
+
+---
+
+### Issue #5b: Server Async/Overlapped Pipes (Already Implemented)
+
+**Severity:** RESOLVED ✅
+**Requirement:** requirements.md Section 6
+**Grade Impact:** None (already implemented)
+
+#### Current Status
+The server now uses async/overlapped I/O correctly:
+
+```cpp
+// PipeServer.h:43 - Async flag enabled
+PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED, // АСИНХРОННИЙ РЕЖИМ
+
+// PipeServer.h:32-38 - OVERLAPPED structure used
+data->oOverlap.hEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
+
+// PipeServer.h:62-80 - Async ConnectNamedPipe with GetOverlappedResult
+ConnectNamedPipe(data->hPipe, &data->oOverlap);
+if (error == ERROR_IO_PENDING) {
+    GetOverlappedResult(data->hPipe, &data->oOverlap, &bytesTransferred, TRUE);
+}
+
+// PipeServer.h:98-103 - Async ReadFile
+ReadFile(data->hPipe, buffer, BUFFER_SIZE - 1, &bytesTransferred, &data->oOverlap);
+
+// PipeServer.h:130-135 - Async WriteFile
+WriteFile(data->hPipe, &replyValue, sizeof(DWORD), &bytesTransferred, &data->oOverlap);
+```
+
+**Compliance:** ✅ **COMPLETE** - Async I/O fully implemented per requirements.md:102
+
+---
+
+### Issue #11: OOP Compliance Violations
+
+**Severity:** MIXED (1 BLOCKING, 1 MODERATE, 2 MINOR)
+**Requirement:** requirements.md Section 2, Line 14
+**Grade Impact:** Blocks 100% grade
+
+#### Requirement Statement
+> "**Tech Stack:** C++ (recommended due to WinAPI usage), **Object-Oriented Programming (OOP) required**."
+
+#### Current Implementation
+- **What's implemented:**
+  - Good class structure: `PipeClient`, `UserList` (excellent encapsulation)
+  - Attack generators: `BruteForceGenerator`, `RuleBasedAttack` (proper classes)
+  - Main application properly uses class instances
+- **What's missing:**
+  1. PipeServer uses static methods for core authentication logic (BLOCKING)
+  2. No polymorphic base class for attack generators (MODERATE)
+  3. PerPipeStruct uses struct with all public members (MINOR)
+  4. Console utilities in namespace instead of class (MINOR - acceptable)
+- **Compliance:** ⚠️ **PARTIAL** - ~85% OOP-compliant, blocking issues prevent 100% grade
+
+#### Impact
+- Does NOT meet explicit 100% grade requirement (requirements.md:14)
+- Violates core OOP principles: encapsulation (PipeServer), polymorphism (attack classes)
+- Educational objective not fully met: demonstrating OOP mastery
+
+---
+
+#### Violation #1: PipeServer Static Thread Logic (BLOCKING)
+
+**File:** `PipeServer.h` (lines 17-95)
+**Severity:** CRITICAL - Blocks 100% grade
+
+**Problem:**
+- Lines 24-95: `static DWORD WINAPI PipeInstanceThread(LPVOID lpvParam)` - 72 lines of core authentication logic implemented as a static method
+- Lines 17-21: `static void Log(HWND hGui, const std::string& text)` - Static logging helper
+- Static methods cannot access instance state via `this->` pointer
+- Requires unsafe C-style casting: `PerPipeData* data = (PerPipeData*)lpvParam;`
+- Thread function passes all state via void pointer instead of using object encapsulation
+
+**Current Code (Non-OOP):**
+```cpp
+// PipeServer.h:24-95
+class PipeServer {
+private:
+    static DWORD WINAPI PipeInstanceThread(LPVOID lpvParam) {
+        PerPipeData* data = (PerPipeData*)lpvParam;  // Manual C-style cast
+        
+        while (true) {
+            data->hPipe = CreateNamedPipeA(...);
+            ConnectNamedPipe(data->hPipe, NULL);
+            
+            // 60+ lines of authentication logic here
+            // Cannot access PipeServer instance state
+            // Cannot use 'this->' pointer
+            
+            CloseHandle(data->hPipe);
+        }
+        return 0;
+    }
+    
+    static void Log(HWND hGui, const string& text) {
+        char* buf = new char[text.length() + 1];
+        strcpy_s(buf, text.length() + 1, text.c_str());
+        PostMessage(hGui, WM_LOG_MSG, (WPARAM)buf, 0);
+    }
+};
+```
+
+**Why This Violates OOP:**
+- **Encapsulation Violation:** Core business logic not encapsulated in instance methods
+- **Static Anti-Pattern:** Static methods used where instance methods are appropriate
+- **State Management:** Cannot access object state, forcing parameter passing
+- **Type Safety:** Requires unsafe void pointer casting instead of type-safe object references
+
+**OOP-Compliant Refactoring:**
+```cpp
+class PipeServer {
+private:
+    vector<HANDLE> threads;
+    bool isRunning;
+    HWND hGui;
+    UserList* userList;
+    
+    // Instance method (non-static)
+    void Log(const string& text) {
+        // Can access this->hGui directly
+        char buf[512];
+        strcpy_s(buf, sizeof(buf), text.c_str());
+        SendMessage(this->hGui, WM_LOG_MSG, (WPARAM)buf, 0);
+    }
+    
+    // Instance method for pipe handling
+    DWORD HandlePipeInstance(int pipeId) {
+        HANDLE hPipe;
+        while (this->isRunning) {  // Can access instance state
+            hPipe = CreateNamedPipeA(...);
+            ConnectNamedPipe(hPipe, NULL);
+            
+            // Authentication logic with access to this->userList
+            char buffer[512];
+            DWORD bytesRead;
+            ReadFile(hPipe, buffer, sizeof(buffer)-1, &bytesRead, NULL);
+            
+            // Parse login/password
+            string message(buffer, bytesRead);
+            // ... use this->userList->CheckUser(...)
+            
+            CloseHandle(hPipe);
+        }
+        return 0;
+    }
+    
+    // Thread wrapper (static required by CreateThread API)
+    static DWORD WINAPI ThreadWrapperFunc(LPVOID lpParam) {
+        PipeServerThreadContext* ctx = (PipeServerThreadContext*)lpParam;
+        return ctx->server->HandlePipeInstance(ctx->pipeId);
+    }
+    
+public:
+    void Start(int numPipes, UserList* uList, HWND gui) {
+        this->hGui = gui;
+        this->userList = uList;
+        this->isRunning = true;
+        
+        for (int i = 0; i < numPipes; i++) {
+            PipeServerThreadContext* ctx = new PipeServerThreadContext;
+            ctx->server = this;
+            ctx->pipeId = i;
+            
+            HANDLE hThread = CreateThread(NULL, 0, ThreadWrapperFunc, ctx, 0, NULL);
+            threads.push_back(hThread);
+        }
+    }
+};
+
+// Helper struct for thread context
+struct PipeServerThreadContext {
+    PipeServer* server;
+    int pipeId;
+};
+```
+
+**Benefits of OOP Refactoring:**
+- ✅ Instance methods can access `this->hGui`, `this->userList`, `this->isRunning`
+- ✅ Type-safe object references instead of void pointers
+- ✅ Encapsulation: all server state managed within the object
+- ✅ Testability: can create PipeServer instances for unit testing
+- ✅ Thread-safety: easier to add synchronization within object methods
+
+**Estimated Effort:** 3-4 hours
+
+---
+
+#### Violation #2: Missing Attack Class Polymorphism (MODERATE)
+
+**Files:** `client/BruteForce.h` (lines 5-27), `client/RuleAttack.h` (lines 8-38)
+**Severity:** MODERATE - Violates polymorphism principle
+
+**Problem:**
+- Two attack classes with nearly identical public interfaces but no common base class
+- Both implement: `HasNext()`, `Next()`, `Reset()`, `GetProgressPercent()`
+- Cannot use polymorphic behavior: `PasswordGenerator* gen = new BruteForceGenerator();`
+- Code duplication and rigid design (cannot easily add new attack types)
+
+**Current Code (No Inheritance):**
+
+```cpp
+// BruteForce.h:
+class BruteForceGenerator {
+private:
+    std::string alphabet;
+    int maxLength;
+    unsigned long long attemptCount;
+    unsigned long long totalCombinations;
+    std::string currentPassword;
+    std::vector<int> indices;
+    bool hasMore;
+    
+public:
+    BruteForceGenerator(const std::string& alphabet, int maxLen);
+    bool HasNext() const;
+    std::string Next();
+    void Reset();
+    std::string GetCurrent() const { return currentPassword; }
+    unsigned long long GetAttemptCount() const { return attemptCount; }
+    unsigned long long GetTotalCombinations() const { return totalCombinations; }
+    double GetProgressPercent() const;
+};
+
+// RuleAttack.h:
+class RuleBasedAttack {
+private:
+    std::vector<std::string> dictionary;
+    std::vector<std::string> variants;
+    std::unordered_set<std::string> variantSet;
+    size_t currentIndex;
+    
+public:
+    RuleBasedAttack();
+    bool LoadDictionaryFromFile();
+    bool LoadDictionaryFromFile(const std::string& filename);
+    void GenerateVariants();
+    std::string Next();
+    void Reset() { currentIndex = 0; }
+    bool HasNext() const { return currentIndex < variants.size(); }
+    size_t GetVariantCount() const { return variants.size(); }
+    size_t GetDictionarySize() const { return dictionary.size(); }
+    double GetProgressPercent() const;
+};
+```
+
+**Why This Violates OOP:**
+- **No Polymorphism:** Cannot treat both as `PasswordGenerator*`
+- **Violates Open/Closed Principle:** Cannot add new attack types without modifying client code
+- **Code Duplication:** Identical method signatures with no shared interface
+
+**OOP-Compliant Refactoring:**
+
+```cpp
+// File: client/PasswordGenerator.h
+class PasswordGenerator {
+public:
+    virtual ~PasswordGenerator() = default;
+    
+    // Pure virtual methods (abstract interface)
+    virtual bool HasNext() const = 0;
+    virtual std::string Next() = 0;
+    virtual void Reset() = 0;
+    virtual double GetProgressPercent() const = 0;
+    virtual size_t GetTotalCount() const = 0;
+};
+
+// File: client/BruteForce.h
+class BruteForceGenerator : public PasswordGenerator {
+private:
+    std::string alphabet;
+    int maxLength;
+    unsigned long long attemptCount;
+    unsigned long long totalCombinations;
+    std::string currentPassword;
+    std::vector<int> indices;
+    bool hasMore;
+    
+public:
+    BruteForceGenerator(const std::string& alphabet, int maxLen);
+    
+    // Implement interface
+    bool HasNext() const override;
+    std::string Next() override;
+    void Reset() override;
+    double GetProgressPercent() const override;
+    size_t GetTotalCount() const override { return totalCombinations; }
+    
+    // Brute-force specific methods
+    std::string GetCurrent() const { return currentPassword; }
+    unsigned long long GetAttemptCount() const { return attemptCount; }
+};
+
+// File: client/RuleAttack.h
+class RuleBasedAttack : public PasswordGenerator {
+private:
+    std::vector<std::string> dictionary;
+    std::vector<std::string> variants;
+    std::unordered_set<std::string> variantSet;
+    size_t currentIndex;
+    
+public:
+    RuleBasedAttack();
+    
+    // Implement interface
+    bool HasNext() const override { return currentIndex < variants.size(); }
+    std::string Next() override;
+    void Reset() override { currentIndex = 0; }
+    double GetProgressPercent() const override;
+    size_t GetTotalCount() const override { return variants.size(); }
+    
+    // Rule-based specific methods
+    bool LoadDictionaryFromFile();
+    bool LoadDictionaryFromFile(const std::string& filename);
+    void GenerateVariants();
+    size_t GetDictionarySize() const { return dictionary.size(); }
+};
+```
+
+**Usage Example (Polymorphic):**
+```cpp
+// main.cpp - Can now use polymorphism
+PasswordGenerator* generator = nullptr;
+
+if (mode == MODE_BRUTE_FORCE) {
+    generator = new BruteForceGenerator(alphabet, maxLen);
+} else if (mode == MODE_RULE_BASED) {
+    RuleBasedAttack* ruleAttack = new RuleBasedAttack();
+    ruleAttack->LoadDictionaryFromFile();
+    ruleAttack->GenerateVariants();
+    generator = ruleAttack;
+}
+
+// Attack loop works with any generator type (polymorphism!)
+while (generator->HasNext()) {
+    std::string password = generator->Next();
+    if (client.TryPassword(login, password)) {
+        Console::Success("Found: " + password);
+        break;
+    }
+    
+    // Display progress (works for both types)
+    Console::PrintProgressBar(generator->GetProgressPercent());
+}
+
+delete generator;
+```
+
+**Benefits:**
+- ✅ Polymorphism: Can treat any attack as `PasswordGenerator*`
+- ✅ Open/Closed Principle: Add new attack types without modifying existing code
+- ✅ Code Reusability: Attack loop logic works for all types
+- ✅ Testability: Can mock `PasswordGenerator` interface
+- ✅ Factory Pattern: Can create generators from config files
+
+**Estimated Effort:** 2-3 hours
+
+---
+
+#### Violation #3: PerPipeStruct Using Struct Instead of Class (MINOR)
+
+**File:** `PerPipeStruct.h` (lines 6-11)
+**Severity:** MINOR - Violates encapsulation
+
+**Problem:**
+- All members are public (no encapsulation)
+- No constructor, methods, or invariants
+- Used as POD (Plain Old Data) type instead of proper class
+
+**Current Code:**
+```cpp
+// PerPipeStruct.h:6-11
+struct PerPipeData {
+    HANDLE hPipe;       // All public
+    int pipeId;
+    HWND hGui;
+    UserList* userList;
+};
+```
+
+**Why This Violates OOP:**
+- **No Encapsulation:** Direct access to all members from outside
+- **No Validation:** Cannot enforce invariants (e.g., `hPipe != INVALID_HANDLE_VALUE`)
+- **No Constructor:** Members may be uninitialized
+
+**OOP-Compliant Refactoring:**
+```cpp
+// PerPipeStruct.h - Convert to class
+class PerPipeData {
+private:
+    HANDLE hPipe;
+    int pipeId;
+    HWND hGui;
+    UserList* userList;
+    
+public:
+    // Constructor with validation
+    PerPipeData(HANDLE pipe, int id, HWND gui, UserList* list)
+        : hPipe(pipe), pipeId(id), hGui(gui), userList(list) {
+        if (!gui || !list) {
+            throw std::invalid_argument("GUI handle and UserList cannot be null");
+        }
+    }
+    
+    // Getters (const-correct)
+    HANDLE GetPipe() const { return hPipe; }
+    int GetPipeId() const { return pipeId; }
+    HWND GetGui() const { return hGui; }
+    UserList* GetUserList() const { return userList; }
+    
+    // Setters (with validation)
+    void SetPipe(HANDLE pipe) {
+        hPipe = pipe;
+    }
+};
+```
+
+**Usage Update:**
+```cpp
+// BEFORE (direct access):
+data->hPipe = CreateNamedPipeA(...);
+data->userList->CheckUser(...);
+
+// AFTER (encapsulated):
+data->SetPipe(CreateNamedPipeA(...));
+data->GetUserList()->CheckUser(...);
+```
+
+**Benefits:**
+- ✅ Encapsulation: Private members with controlled access
+- ✅ Validation: Constructor ensures valid state
+- ✅ Const-correctness: Read-only access via const getters
+- ✅ Future-proof: Can add logging/validation in setters
+
+**Estimated Effort:** 1 hour
+
+---
+
+#### Violation #4: Console Namespace Instead of Class (MINOR - ACCEPTABLE)
+
+**File:** `client/Utils.h` (lines 40-72)
+**Severity:** MINOR - Acceptable C++ pattern, but not strict OOP
+
+**Problem:**
+- Console utilities implemented as free functions in a namespace
+- Stricter OOP would use a static utility class
+
+**Current Code:**
+```cpp
+namespace Console {
+    void ClearLine();
+    void PrintProgressBar(double percent, int width);
+    void PrintHeader(const std::string& title);
+    void PrintSeparator(int width);
+    enum Color { /* ... */ };
+    void SetColor(Color color);
+    void ResetColor();
+    void PrintColored(const std::string& text, Color color);
+    void PrintSuccess(const std::string& msg);
+    void PrintError(const std::string& msg);
+    void PrintInfo(const std::string& msg);
+    void PrintWarning(const std::string& msg);
+}
+```
+
+**Alternative OOP Pattern:**
+```cpp
+class ConsoleUI {
+public:
+    static void ClearLine();
+    static void PrintProgressBar(double percent, int width = 50);
+    static void PrintHeader(const std::string& title);
+    
+    enum class Color { /* ... */ };
+    static void SetColor(Color color);
+    static void ResetColor();
+    static void PrintColored(const std::string& text, Color color);
+    static void PrintSuccess(const std::string& msg);
+    static void PrintError(const std::string& msg);
+};
+```
+
+**Note:** Namespace pattern is acceptable in modern C++. This is the lowest priority fix.
+
+**Estimated Effort:** 30 minutes (if changed)
+
+---
+
+#### Files to Modify
+
+**Critical (BLOCKING):**
+- `C:\Users\glebm\projects\tech-safety\brute-force\PipeServer.h` (lines 17-95)
+
+**Moderate:**
+- `C:\Users\glebm\projects\tech-safety\brute-force\client\BruteForce.h`
+- `C:\Users\glebm\projects\tech-safety\brute-force\client\RuleAttack.h`
+- `C:\Users\glebm\projects\tech-safety\brute-force\client\PasswordGenerator.h` (NEW FILE)
+- `C:\Users\glebm\projects\tech-safety\brute-force\client\main.cpp` (update to use polymorphism)
+
+**Minor:**
+- `C:\Users\glebm\projects\tech-safety\brute-force\PerPipeStruct.h` (lines 6-11)
+- `C:\Users\glebm\projects\tech-safety\brute-force\client\Utils.h` (lines 40-72) [OPTIONAL]
+
+---
+
+#### Implementation Plan
+
+**Step 1: Fix PipeServer Static Methods (BLOCKING - 3-4 hours)**
+
+1.1. Create helper struct for thread context:
+```cpp
+struct PipeServerThreadContext {
+    PipeServer* server;
+    int pipeId;
+};
+```
+
+1.2. Convert `Log()` to instance method:
+```cpp
+void Log(const string& text) {
+    SendMessage(this->hGui, WM_LOG_MSG, (WPARAM)text.c_str(), 0);
+}
+```
+
+1.3. Refactor `PipeInstanceThread()` → `HandlePipeInstance()`:
+- Change from `static DWORD WINAPI` to `DWORD` (instance method)
+- Replace `PerPipeData* data = (PerPipeData*)lpvParam;` with method parameters
+- Use `this->hGui`, `this->userList`, `this->isRunning` instead of parameter passing
+
+1.4. Create thin static wrapper for CreateThread:
+```cpp
+static DWORD WINAPI ThreadWrapperFunc(LPVOID lpParam) {
+    PipeServerThreadContext* ctx = (PipeServerThreadContext*)lpParam;
+    return ctx->server->HandlePipeInstance(ctx->pipeId);
+}
+```
+
+1.5. Update `Start()` method to pass `this` pointer to threads
+
+1.6. Build and test: Verify server still handles authentication correctly
+
+---
+
+**Step 2: Implement Attack Class Polymorphism (MODERATE - 2-3 hours)**
+
+2.1. Create `client/PasswordGenerator.h`:
+```cpp
+class PasswordGenerator {
+public:
+    virtual ~PasswordGenerator() = default;
+    virtual bool HasNext() const = 0;
+    virtual std::string Next() = 0;
+    virtual void Reset() = 0;
+    virtual double GetProgressPercent() const = 0;
+    virtual size_t GetTotalCount() const = 0;
+};
+```
+
+2.2. Modify `BruteForceGenerator` to inherit from `PasswordGenerator`:
+- Add `#include "PasswordGenerator.h"`
+- Change class declaration: `class BruteForceGenerator : public PasswordGenerator`
+- Add `override` keyword to interface methods
+- Implement `GetTotalCount()` method
+
+2.3. Modify `RuleBasedAttack` to inherit from `PasswordGenerator`:
+- Add `#include "PasswordGenerator.h"`
+- Change class declaration: `class RuleBasedAttack : public PasswordGenerator`
+- Add `override` keyword to interface methods
+- Implement `GetTotalCount()` method
+
+2.4. Update `main.cpp` to use polymorphism:
+- Use `PasswordGenerator*` pointer
+- Assign to either `new BruteForceGenerator()` or `new RuleBasedAttack()`
+- Attack loop uses polymorphic interface
+- `delete generator;` at end
+
+2.5. Build and test: Verify both attack modes work with polymorphic interface
+
+---
+
+**Step 3: Convert PerPipeStruct to Class (MINOR - 1 hour)**
+
+3.1. Rename `PerPipeStruct.h` → `PerPipeData.h` (optional)
+
+3.2. Change `struct PerPipeData` → `class PerPipeData`:
+```cpp
+class PerPipeData {
+private:
+    HANDLE hPipe;
+    int pipeId;
+    HWND hGui;
+    UserList* userList;
+public:
+    PerPipeData(HANDLE pipe, int id, HWND gui, UserList* list);
+    // Getters/setters
+};
+```
+
+3.3. Update all references in `PipeServer.h` to use getters/setters
+
+3.4. Build and test: Verify no compilation errors
+
+---
+
+**Step 4: Convert Console Namespace to Class (OPTIONAL - 30 min)**
+
+4.1. Change `namespace Console` → `class ConsoleUI`
+
+4.2. Add `static` keyword to all member functions
+
+4.3. Update all call sites: `Console::PrintSuccess()` → `ConsoleUI::PrintSuccess()`
+
+4.4. Build and test: Verify all console output works
+
+---
+
+#### Testing
+
+**Test 1: OOP Principles Verification**
+- ✅ Encapsulation: All classes have private members with controlled access
+- ✅ Inheritance: Attack classes inherit from common base
+- ✅ Polymorphism: Can use `PasswordGenerator*` to point to either attack type
+- ✅ Abstraction: Interface (`PasswordGenerator`) separates contract from implementation
+
+**Test 2: Functional Verification**
+- ✅ Server: Start server, verify 3 threads created, test authentication
+- ✅ Brute Force: Run brute force attack, verify progress tracking works
+- ✅ Rule-Based: Run rule-based attack, verify polymorphic interface works
+- ✅ Integration: Run full attack scenario, verify no regressions
+
+**Test 3: Code Review**
+- ✅ No static methods containing business logic (except thread wrappers)
+- ✅ No structs with all public members (except POD types if needed)
+- ✅ Classes use proper encapsulation (private/protected/public)
+- ✅ Virtual methods used for polymorphic behavior
+
+---
+
+#### Compliance After Fix
+
+| OOP Principle | Before | After |
+|---------------|--------|-------|
+| Encapsulation | ⚠️ PARTIAL (PipeServer static, PerPipeStruct public) | ✅ FULL |
+| Inheritance   | ❌ NONE (attack classes independent) | ✅ FULL (PasswordGenerator base) |
+| Polymorphism  | ❌ NONE (no virtual methods) | ✅ FULL (polymorphic attack loop) |
+| Abstraction   | ⚠️ PARTIAL (classes exist but no interfaces) | ✅ FULL (PasswordGenerator interface) |
+
+**Estimated Grade Impact:** 85% → 100% OOP compliance
 
 ---
 
@@ -1360,55 +2078,66 @@ Test scenarios:
 
 ## Implementation Priority
 
-### Phase 1: Requirements Compliance (100% Grade)
-**Priority:** HIGHEST
-**Timeframe:** 2-3 days
+### Phase 1: Critical Bug Fix (IMMEDIATE)
+**Priority:** CRITICAL
+**Timeframe:** 2-3 hours
 
-1. **Issue #1:** Implement templated singly linked list
-2. **Issue #2:** Add character transposition rule
-3. **Issue #3:** Complete keyboard layout swap (Cyrillic to Latin)
+1. **Issue #5:** Fix race condition on `blockedUsers` map (add CRITICAL_SECTION)
+
+**Deliverable:** Thread-safe anti-cracking protection, server stability
+
+---
+
+### Phase 2: Requirements Compliance (100% Grade)
+**Priority:** HIGHEST
+**Timeframe:** 3-4 days
+
+2. **Issue #1:** Implement templated singly linked list
+3. **Issue #2:** Add character transposition rule
+4. **Issue #3:** Complete keyboard layout swap (Cyrillic to Latin)
+5. **Issue #11:** Fix OOP compliance violations (PipeServer refactoring + attack polymorphism)
 
 **Deliverable:** Achieve 100% grade compliance
 
 ---
 
-### Phase 2: Multithreading Enhancement (140% Grade)
+### Phase 3: Multithreading Enhancement (140% Grade)
 **Priority:** HIGH
 **Timeframe:** 2-3 days
 
-4. **Issue #4:** Implement client-side multithreading
+6. **Issue #4:** Implement client-side multithreading
 
 **Deliverable:** Achieve 140% grade compliance + significant performance boost
 
 ---
 
-### Phase 3: Code Quality & Security
+### Phase 4: Code Quality & Security
 **Priority:** MEDIUM
 **Timeframe:** 1-2 days
 
-5. **Issue #6:** Fix memory leak in logging
-6. **Issue #7:** Implement graceful thread shutdown
-7. **Issue #8:** Add buffer overflow protection
+7. **Issue #6:** Fix memory leak in logging
+8. **Issue #7:** Implement graceful thread shutdown
+9. **Issue #8:** Add buffer overflow protection
 
 **Deliverable:** Production-quality, secure codebase
 
 ---
 
-### Phase 4: Performance Optimization
+### Phase 5: Performance Optimization
 **Priority:** MEDIUM
 **Timeframe:** 1 day
 
-8. **Issue #9:** Implement persistent connections
+10. **Issue #9:** Implement persistent connections
 
 **Deliverable:** 10-100x brute force attack speedup
 
 ---
 
-### Phase 5: Best Practices (Optional)
+### Phase 6: Best Practices (Optional)
 **Priority:** LOW
 **Timeframe:** 1-2 days
 
-9. **Issue #5:** Convert to async/overlapped pipes
+11. **Issue #5b:** ~~Convert to async/overlapped pipes~~ ✅ ALREADY IMPLEMENTED
 10. **Issue #10:** Enhanced error handling
 
 **Deliverable:** Industry best practices compliance
@@ -1457,7 +2186,7 @@ Test scenarios:
 
 ### Critical Path to 100% Grade
 ```
-Issue #1 (Linked List) → Issue #2 (Transposition) → Issue #3 (Keyboard Swap) → 100% GRADE
+Issue #5 (Race Condition FIX) → Issue #1 (Linked List) → Issue #2 (Transposition) → Issue #3 (Keyboard Swap) → Issue #11 (OOP Compliance) → 100% GRADE
 ```
 
 ### Critical Path to 140% Grade
@@ -1467,24 +2196,32 @@ Issue #1 (Linked List) → Issue #2 (Transposition) → Issue #3 (Keyboard Swap)
 
 ### Recommended Implementation Order
 ```
+0. #5 (Race Condition) - 2 hours ⚠️ CRITICAL - DO THIS FIRST!
+   - Add CRITICAL_SECTION to list.h
+   - Protect blockedUsers map access
+   ↓ ANTI-CRACKING PROTECTION WORKS
 1. #1 (Linked List) - 4 hours
 2. #2 (Transposition) - 2 hours
 3. #3 (Keyboard Swap) - 3 hours
-   ↓ 100% GRADE ACHIEVED
-4. #6 (Memory Leak) - 1 hour
-5. #7 (Thread Cleanup) - 2 hours
-6. #8 (Buffer Safety) - 1 hour
+4. #11 (OOP Compliance) - 6 hours
+   - PipeServer refactoring: 3-4 hours
+   - Attack class polymorphism: 2-3 hours
+   - PerPipeStruct encapsulation: 1 hour
+   ↓ 100% GRADE ACHIEVED (OOP REQUIREMENTS MET)
+5. #6 (Memory Leak) - 1 hour
+6. #7 (Thread Cleanup) - 2 hours
+7. #8 (Buffer Safety) - 1 hour
    ↓ HIGH SEVERITY BUGS FIXED
-7. #9 (Persistent Connections) - 3 hours
+8. #9 (Persistent Connections) - 3 hours
    ↓ MAJOR PERFORMANCE BOOST
-8. #4 (Client Multithreading) - 6 hours
+9. #4 (Client Multithreading) - 6 hours
    ↓ 140% GRADE ACHIEVED
-9. #10 (Error Handling) - 2 hours
-10. #5 (Async Pipes) - 4 hours
+10. #10 (Error Handling) - 2 hours
+11. #5b (Async Pipes) - ✅ ALREADY DONE
     ↓ PRODUCTION READY
 ```
 
-**Total Estimated Time:** 28 hours (~3.5 working days)
+**Total Estimated Time:** 32 hours (~4 working days)
 
 ---
 

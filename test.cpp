@@ -56,7 +56,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
             if (g_Users.Count() == 0) {
                 MessageBox(hwnd, "Please load users file first!", "Error", MB_ICONERROR);
             } else {
-                g_Server.Start(3, &g_Users, hwnd); // Запускаємо 3 потоки
+                g_Server.Start(16, &g_Users, hwnd); // 16 concurrent pipes for multithreaded clients
                 EnableWindow(GetDlgItem(hwnd, IDC_START_BTN), FALSE); // Блокуємо кнопку
             }
             break;
@@ -65,15 +65,17 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
 
     case WM_LOG_MSG: 
         {
-            // Отримали лог від сервера
-            char* text = (char*)wParam;
-            int idx = SendDlgItemMessage(hwnd, IDC_LOG_LIST, LB_ADDSTRING, 0, (LPARAM)text);
+            // Отримали лог від сервера (SendMessage - synchronous, no memory to free)
+            const char* text = (const char*)wParam;
+            LPARAM len = lParam;
+            std::string logText(text, len);
+            int idx = SendDlgItemMessage(hwnd, IDC_LOG_LIST, LB_ADDSTRING, 0, (LPARAM)logText.c_str());
             SendDlgItemMessage(hwnd, IDC_LOG_LIST, LB_SETTOPINDEX, idx, 0); // Прокрутка вниз
-            delete[] text;
         }
         break;
 
     case WM_DESTROY:
+        g_Server.Stop();  // Graceful thread cleanup
         PostQuitMessage(0);
         break;
 

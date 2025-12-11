@@ -43,12 +43,10 @@ bool PipeClient::Connect(const std::string& computerName) {
 }
 
 bool PipeClient::TryPassword(const std::string& login, const std::string& password) {
-    if (!IsConnected()) {
-        std::string target = lastComputerName.empty() ? "." : lastComputerName;
-        if (!Connect(target)) {
-            std::cout << "[!] Connection failed inside TryPassword\n";
-            return false;
-        }
+    // Always start fresh - connect for each attempt
+    // This is more reliable with the current server architecture
+    if (!Connect(lastComputerName.empty() ? "." : lastComputerName)) {
+        return false;
     }
 
     std::string message = login + " " + password;
@@ -66,7 +64,8 @@ bool PipeClient::TryPassword(const std::string& login, const std::string& passwo
 
     bool isSuccess = (response == 1);
 
-    Disconnect(); 
+    // Disconnect after each attempt - server expects this
+    Disconnect();
 
     return isSuccess;
 }
@@ -135,26 +134,45 @@ bool PipeClient::SendData(const std::string& data) {
 
 bool PipeClient::ReceiveResponse(DWORD& response) {
     DWORD bytesRead;
-    // Читаємо sizeof(DWORD) (4 байти)
+    
     if (!ReadFile(hPipe, &response, sizeof(DWORD), &bytesRead, NULL)) {
-        std::cout << "[!] ReadFile failed, attempting reconnection...\n";
-        if (Reconnect()) {
-            std::cout << "[*] Reconnected, retrying...\n";
-            // Тут теж читаємо sizeof(DWORD)
-            if (!ReadFile(hPipe, &response, sizeof(DWORD), &bytesRead, NULL)) {
-                std::cout << "[!] ReadFile failed after reconnection: " << GetLastErrorMsg() << "\n";
-                Disconnect();
+        DWORD error = ::GetLastError();
+        
+        // Enhanced error reporting (Issue #10)
+        if (error == ERROR_BROKEN_PIPE || error == ERROR_PIPE_NOT_CONNECTED) {
+            std::cout << "[!] Server disconnected (Error " << error << ")\n";
+        } else if (error == ERROR_INVALID_HANDLE) {
+            std::cout << "[!] Invalid pipe handle (Error " << error << ")\n";
+        } else {
+            std::cout << "[!] ReadFile failed (Error " << error << "): " << GetLastErrorMsg() << "\n";
+        }
+        
+        // Try to reconnect for transient errors
+        if (error == ERROR_BROKEN_PIPE || error == ERROR_PIPE_NOT_CONNECTED) {
+            std::cout << "[*] Attempting reconnection...\n";
+            if (Reconnect()) {
+                std::cout << "[*] Reconnected, retrying...\n";
+                if (!ReadFile(hPipe, &response, sizeof(DWORD), &bytesRead, NULL)) {
+                    DWORD retryError = ::GetLastError();
+                    std::cout << "[!] ReadFile failed after reconnection (Error " << retryError << "): " 
+                             << GetLastErrorMsg() << "\n";
+                    Disconnect();
+                    return false;
+                }
+            } else {
+                std::cout << "[!] Failed to reconnect to server\n";
                 return false;
             }
         } else {
-            std::cout << "[!] Failed to reconnect to server\n";
+            Disconnect();
             return false;
         }
     }
 
-    // Перевіряємо, чи прочитали ми 4 байти
+    // Validate response size
     if (bytesRead != sizeof(DWORD)) {
-        std::cout << "[!] ReadFile read " << bytesRead << " bytes instead of " << sizeof(DWORD) << "\n";
+        std::cout << "[!] Incomplete response: received " << bytesRead 
+                  << " bytes, expected " << sizeof(DWORD) << " bytes\n";
         return false;
     }
 

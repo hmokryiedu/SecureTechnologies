@@ -160,12 +160,70 @@ std::string RuleBasedAttack::LatinToCyrillic(const std::string& latin) {
 }
 
 std::string RuleBasedAttack::CyrillicToLatin(const std::string& cyrillic) {
-    // Simple approach: for each character, try to find a mapping
-    // This is simplified - real Cyrillic would require UTF-8 handling
-    std::string result = cyrillic;
-    // In a real implementation, we'd need proper UTF-8 Cyrillic support
-    // For now, return as-is since we can't easily map back
+    // Cyrillic to Latin keyboard mapping (typing Cyrillic on English layout)
+    // Maps what you would type in English to get Cyrillic letters
+    static const std::map<std::string, char> cyrToLat = {
+        // Lowercase Cyrillic -> Latin key position
+        {"а", 'f'}, {"б", ','}, {"в", 'd'}, {"г", 'u'}, {"д", 'l'},
+        {"е", 't'}, {"ё", '`'}, {"ж", ';'}, {"з", 'p'}, {"и", 'b'},
+        {"й", 'q'}, {"к", 'r'}, {"л", 'k'}, {"м", 'v'}, {"н", 'y'},
+        {"о", 'j'}, {"п", 'g'}, {"р", 'h'}, {"с", 'c'}, {"т", 'n'},
+        {"у", 'e'}, {"ф", 'a'}, {"х", '['}, {"ц", 'w'}, {"ч", 'x'},
+        {"ш", 'i'}, {"щ", 'o'}, {"ъ", ']'}, {"ы", 's'}, {"ь", 'm'},
+        {"э", '\''}, {"ю", '.'}, {"я", 'z'},
+        // Uppercase Cyrillic -> Latin key position (with Shift)
+        {"А", 'F'}, {"Б", '<'}, {"В", 'D'}, {"Г", 'U'}, {"Д", 'L'},
+        {"Е", 'T'}, {"Ё", '~'}, {"Ж", ':'}, {"З", 'P'}, {"И", 'B'},
+        {"Й", 'Q'}, {"К", 'R'}, {"Л", 'K'}, {"М", 'V'}, {"Н", 'Y'},
+        {"О", 'J'}, {"П", 'G'}, {"Р", 'H'}, {"С", 'C'}, {"Т", 'N'},
+        {"У", 'E'}, {"Ф", 'A'}, {"Х", '{'}, {"Ц", 'W'}, {"Ч", 'X'},
+        {"Ш", 'I'}, {"Щ", 'O'}, {"Ъ", '}'}, {"Ы", 'S'}, {"Ь", 'M'},
+        {"Э", '"'}, {"Ю", '>'}, {"Я", 'Z'}
+    };
+
+    std::string result;
+    size_t i = 0;
+    
+    while (i < cyrillic.length()) {
+        bool found = false;
+        
+        // Try to match 2-byte UTF-8 Cyrillic character
+        if (i + 1 < cyrillic.length()) {
+            std::string twoBytes = cyrillic.substr(i, 2);
+            auto it = cyrToLat.find(twoBytes);
+            if (it != cyrToLat.end()) {
+                result += it->second;
+                i += 2;
+                found = true;
+            }
+        }
+        
+        if (!found) {
+            // Keep non-Cyrillic characters as-is
+            result += cyrillic[i];
+            i++;
+        }
+    }
+    
     return result;
+}
+
+// Character transposition rule (requirements.md Section 3.B.3)
+std::vector<std::string> RuleBasedAttack::TransposeCharacters(const std::string& password) {
+    std::vector<std::string> transposed;
+    
+    if (password.length() < 2) {
+        return transposed;
+    }
+
+    // Generate all adjacent character swaps
+    for (size_t i = 0; i < password.length() - 1; i++) {
+        std::string variant = password;
+        std::swap(variant[i], variant[i + 1]);
+        transposed.push_back(variant);
+    }
+
+    return transposed;
 }
 
 void RuleBasedAttack::ApplyAllRules(const std::string& base) {
@@ -179,7 +237,7 @@ void RuleBasedAttack::ApplyAllRules(const std::string& base) {
     // Rule 3: With digit suffixes
     GenerateDigitSuffixes(base);
 
-    // Rule 4: Latin to Cyrillic conversion
+    // Rule 4: Latin to Cyrillic conversion (typing "ghbdtn" instead of "привет")
     std::string cyrillic = LatinToCyrillic(base);
     if (cyrillic != base) {
         GenerateCaseVariations(cyrillic);
@@ -193,5 +251,25 @@ void RuleBasedAttack::ApplyAllRules(const std::string& base) {
     std::string cyrillicReversed = ReversePassword(cyrillic);
     if (cyrillicReversed != base && cyrillicReversed != cyrillic) {
         GenerateCaseVariations(cyrillicReversed);
+    }
+    
+    // Rule 7: Cyrillic to Latin conversion (requirements.md Section 3.B.3)
+    std::string latin = CyrillicToLatin(base);
+    if (latin != base) {
+        GenerateCaseVariations(latin);
+        GenerateDigitSuffixes(latin);
+    }
+    
+    // Rule 8: Character transposition (requirements.md Section 3.B.3)
+    auto transpositions = TransposeCharacters(base);
+    for (const auto& trans : transpositions) {
+        AddVariant(trans);
+        // Also add case variations for transposed passwords
+        std::string lower = trans;
+        std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+        AddVariant(lower);
+        std::string upper = trans;
+        std::transform(upper.begin(), upper.end(), upper.begin(), ::toupper);
+        AddVariant(upper);
     }
 }

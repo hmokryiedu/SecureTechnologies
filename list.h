@@ -21,13 +21,14 @@ private:
     bool protectionMode; // Режим захисту
     int maxLoginLen;
     int maxPassLen;
-    CRITICAL_SECTION blockedUsersLock; // Protects blockedUsers map
+    
+    CRITICAL_SECTION blockedUsersLock; // Thread synchronization for blockedUsers map
 
 public:
     UserList() : protectionMode(false), maxLoginLen(0), maxPassLen(0) {
         InitializeCriticalSection(&blockedUsersLock);
     }
-
+    
     ~UserList() {
         DeleteCriticalSection(&blockedUsersLock);
     }
@@ -80,10 +81,10 @@ public:
 
     // Перевірка: 1 = ОК, 0 = Невірний пароль, -1 = Заблоковано
     int CheckUser(const string& login, const string& pass) {
-        // 1. Перевірка блокування (Anti-Brute-Force)
+        // 1. Перевірка блокування (Anti-Brute-Force) - thread-safe
         if (protectionMode) {
             EnterCriticalSection(&blockedUsersLock);
-
+            
             DWORD currentTime = GetTickCount();
             if (blockedUsers.count(login)) {
                 if (currentTime < blockedUsers[login]) {
@@ -93,7 +94,7 @@ public:
                     blockedUsers.erase(login); // Час бану вийшов
                 }
             }
-
+            
             LeaveCriticalSection(&blockedUsersLock);
         }
 

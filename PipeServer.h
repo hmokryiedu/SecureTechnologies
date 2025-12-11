@@ -8,106 +8,211 @@
 #define PIPE_NAME "\\\\.\\pipe\\AuthPipe" 
 #define BUFFER_SIZE 512
 
+using namespace std;
+
 class PipeServer {
 private:
     vector<HANDLE> threads;
     bool isRunning;
+    HANDLE hShutdownEvent;  // Event for graceful thread shutdown
 
-    // Логування в GUI
+    // Fixed memory leak: Using SendMessage instead of PostMessage with dynamic allocation
     static void Log(HWND hGui, const string& text) {
-        char* buf = new char[text.length() + 1];
-        strcpy_s(buf, text.length() + 1, text.c_str());
-        PostMessage(hGui, WM_LOG_MSG, (WPARAM)buf, 0);
+        // SendMessage is synchronous, so we can use stack buffer safely
+        SendMessage(hGui, WM_LOG_MSG, (WPARAM)text.c_str(), (LPARAM)text.length());
     }
 
-    // Потік обробки
+    // АСИНХРОННИЙ (Overlapped) потік
     static DWORD WINAPI PipeInstanceThread(LPVOID lpvParam) {
         PerPipeData* data = (PerPipeData*)lpvParam;
         char buffer[BUFFER_SIZE];
-        DWORD bytesRead, bytesWritten;
+        DWORD bytesTransferred;
         BOOL success;
 
-        while (true) {
-            // 1. Створюємо канал
-            data->hPipe = CreateNamedPipeA(
-                PIPE_NAME,
-                PIPE_ACCESS_DUPLEX,
-                PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
-                PIPE_UNLIMITED_INSTANCES,
-                BUFFER_SIZE, BUFFER_SIZE,
-                0, NULL);
-
-            if (data->hPipe == INVALID_HANDLE_VALUE) {
-                Log(data->hGui, "Error creating pipe.");
-                break;
-            }
-
-            // 2. Чекаємо клієнта
-            BOOL connected = ConnectNamedPipe(data->hPipe, NULL) ? TRUE : (GetLastError() == ERROR_PIPE_CONNECTED);
-
-            if (connected) {
-                string loginStr, passStr;
-
-                // 3. Читаємо повідомлення (Логін + Пароль)
-                ZeroMemory(buffer, BUFFER_SIZE);
-                success = ReadFile(data->hPipe, buffer, BUFFER_SIZE - 1, &bytesRead, NULL);
-
-                if (success && bytesRead > 0) {
-                    string fullMessage(buffer);
-                    stringstream ss(fullMessage);
-                    ss >> loginStr;
-                    if (!ss.eof()) ss >> passStr;
-
-                    // 4. Перевірка
-                    int res = data->userList->CheckUser(loginStr, passStr);
-                    DWORD replyValue = 0; 
-
-                    if (res == -1) {
-                        // Блокування логуємо
-                        Log(data->hGui, "[PROTECT] Ignored: " + loginStr);
-                        Sleep(1000);
-                        replyValue = 0;
-                    }
-                    else if (res == 1) {
-                        // Успіх логуємо
-                        Log(data->hGui, "[SUCCESS] Login: " + loginStr);
-                    }
-                    else {
-                        // Невдачу не логуємо
-                        replyValue = 0;
-                    }
-
-                    // 5. Відправка відповіді (4 байти числа)
-                    WriteFile(data->hPipe, &replyValue, sizeof(DWORD), &bytesWritten, NULL);
-                    
-                    // Примусовий запис і невелика пауза
-                    FlushFileBuffers(data->hPipe);    
-                }
-
-                // 6. Розрив з'єднання
-                DisconnectNamedPipe(data->hPipe);
-            }
-            CloseHandle(data->hPipe);
+        // 1. Ініціалізація Overlapped події (Manual Reset)
+        data->GetOverlap()->hEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
+        if (data->GetOverlap()->hEvent == NULL) {
+            Log(data->GetGui(), "Error creating event.");
+            delete data;
+            return 0;
         }
 
+        // 2. Створюємо трубу з прапором FILE_FLAG_OVERLAPPED
+        data->SetPipe(CreateNamedPipeA(
+            PIPE_NAME,
+            PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
+            PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
+            PIPE_UNLIMITED_INSTANCES,
+            BUFFER_SIZE, BUFFER_SIZE,
+            0, NULL));
+
+        if (data->GetPipe() == INVALID_HANDLE_VALUE) {
+            Log(data->GetGui(), "Error creating pipe.");
+            CloseHandle(data->GetOverlap()->hEvent);
+            delete data;
+            return 0;
+        }
+
+        // Main server loop with shutdown check
+        while (WaitForSingleObject(data->GetShutdownEvent(), 0) == WAIT_TIMEOUT) {
+            // 3. Асинхронне підключення (ConnectNamedPipe)
+            ResetEvent(data->GetOverlap()->hEvent);
+            
+            BOOL connected = ConnectNamedPipe(data->GetPipe(), data->GetOverlap());
+
+            if (connected) {
+                 // Клієнт підключився миттєво
+            }
+            else {
+                DWORD error = GetLastError();
+                if (error == ERROR_IO_PENDING) {
+                    if (!GetOverlappedResult(data->GetPipe(), data->GetOverlap(), &bytesTransferred, TRUE)) {
+                        DisconnectNamedPipe(data->GetPipe());
+                        continue; 
+                    }
+                }
+                else if (error == ERROR_PIPE_CONNECTED) {
+                    // Клієнт вже тут
+                }
+                else {
+                    DisconnectNamedPipe(data->GetPipe());
+                    continue;
+                }
+            }
+
+            // --- КЛІЄНТ ПІДКЛЮЧЕНИЙ ---
+
+            string loginStr, passStr;
+
+            // 4. Асинхронне читання (ReadFile)
+            ZeroMemory(buffer, BUFFER_SIZE);
+            ResetEvent(data->GetOverlap()->hEvent);
+
+            success = ReadFile(data->GetPipe(), buffer, BUFFER_SIZE - 1, &bytesTransferred, data->GetOverlap());
+
+            if (!success && GetLastError() == ERROR_IO_PENDING) {
+                success = GetOverlappedResult(data->GetPipe(), data->GetOverlap(), &bytesTransferred, TRUE);
+            }
+
+            if (success && bytesTransferred > 0) {
+                // Buffer overflow protection
+                if (bytesTransferred >= BUFFER_SIZE) {
+                    bytesTransferred = BUFFER_SIZE - 1;
+                }
+                buffer[bytesTransferred] = '\0';
+                
+                string fullMessage(buffer);
+                stringstream ss(fullMessage);
+                ss >> loginStr;
+                if (!ss.eof()) ss >> passStr;
+
+                // Перевірка
+                int res = data->GetUserList()->CheckUser(loginStr, passStr);
+                DWORD replyValue = 0;
+
+                if (res == -1) {
+                    Log(data->GetGui(), "[PROTECT] Ignored: " + loginStr);
+                    Sleep(1000);
+                    replyValue = 0;
+                }
+                else if (res == 1) {
+                    Log(data->GetGui(), "[SUCCESS] Login: " + loginStr);
+                    replyValue = 1;
+                }
+                else {
+                    replyValue = 0;
+                }
+
+                // 5. Асинхронний запис (WriteFile)
+                ResetEvent(data->GetOverlap()->hEvent);
+                success = WriteFile(data->GetPipe(), &replyValue, sizeof(DWORD), &bytesTransferred, data->GetOverlap());
+                
+                if (!success && GetLastError() == ERROR_IO_PENDING) {
+                    GetOverlappedResult(data->GetPipe(), data->GetOverlap(), &bytesTransferred, TRUE);
+                }
+                
+                FlushFileBuffers(data->GetPipe());
+            } else {
+                // Enhanced error handling (Issue #10)
+                DWORD error = GetLastError();
+                
+                if (error == ERROR_BROKEN_PIPE) {
+                    Log(data->GetGui(), "[INFO] Client disconnected during read");
+                } else if (error == ERROR_NO_DATA) {
+                    Log(data->GetGui(), "[INFO] Pipe closing");
+                } else if (bytesTransferred == 0 && success) {
+                    // Graceful disconnect
+                } else if (error != 0) {
+                    char errorMsg[256];
+                    FormatMessageA(FORMAT_MESSAGE_FROM_SYSTEM, NULL, error,
+                                  0, errorMsg, sizeof(errorMsg), NULL);
+                    Log(data->GetGui(), "[ERROR] Pipe read error (" + to_string(error) + "): " + string(errorMsg));
+                }
+            }
+
+            // 6. Відключення
+            DisconnectNamedPipe(data->GetPipe());
+        }
+
+        CloseHandle(data->GetOverlap()->hEvent);
+        CloseHandle(data->GetPipe());
         delete data;
         return 0;
     }
 
 public:
-    PipeServer() : isRunning(false) {}
+    PipeServer() : isRunning(false), hShutdownEvent(NULL) {}
 
     void Start(int numPipes, UserList* uList, HWND hGui) {
         isRunning = true;
+        
+        // Create shutdown event (manual-reset, initially non-signaled)
+        hShutdownEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
+        
         for (int i = 0; i < numPipes; i++) {
-            PerPipeData* data = new PerPipeData;
-            data->pipeId = i + 1;
-            data->userList = uList;
-            data->hGui = hGui;
+            PerPipeData* data = new PerPipeData(i + 1, hGui, uList, hShutdownEvent);
             
             HANDLE hThread = CreateThread(NULL, 0, PipeInstanceThread, data, 0, NULL);
             if (hThread) threads.push_back(hThread);
         }
-        Log(hGui, "Server ON. Pipe: " + string(PIPE_NAME));
+        Log(hGui, "Async Server ON. Pipe: " + string(PIPE_NAME));
+    }
+
+    void Stop() {
+        if (!isRunning) return;
+        
+        isRunning = false;
+        
+        if (hShutdownEvent) {
+            // Signal all threads to exit
+            SetEvent(hShutdownEvent);
+            
+            // Wait for all threads to finish (5 second timeout)
+            if (threads.size() > 0) {
+                DWORD result = WaitForMultipleObjects(
+                    (DWORD)threads.size(),
+                    threads.data(),
+                    TRUE,  // Wait for all
+                    5000   // 5 second timeout
+                );
+                
+                if (result == WAIT_TIMEOUT) {
+                    // Log timeout but continue cleanup
+                }
+                
+                // Close all thread handles
+                for (HANDLE h : threads) {
+                    CloseHandle(h);
+                }
+                threads.clear();
+            }
+            
+            CloseHandle(hShutdownEvent);
+            hShutdownEvent = NULL;
+        }
+    }
+    
+    ~PipeServer() {
+        Stop();
     }
 };
