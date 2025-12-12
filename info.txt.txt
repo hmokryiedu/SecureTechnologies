@@ -1,6 +1,0 @@
-20 20
-known_user Secure_Connect_1!
-viol_R1 Winter123
-viol_R2 Lab2025!
-viol_R5 MyP!
-ideal_R4 4Dogs@Home

@@ -4,7 +4,13 @@
       "Bash(git checkout:*)",
       "Bash(g++:*)",
       "Bash(git -C \"C:\\Users\\glebm\\projects\\tech-safety\\brute-force\" log --oneline -20)",
-      "Bash(git ls-tree:*)"
+      "Bash(git ls-tree:*)",
+      "Bash(python3:*)",
+      "Bash(ls:*)",
+      "Bash(cat:*)",
+      "Bash(.clientclient.exe --batch-rule david \"vocabularies\\vocab_common_sequences.txt\" 4)",
+      "Bash(cmd /c \"client\\client.exe --batch-rule david vocabularies\\vocab_common_sequences.txt 4\")",
+      "Bash(client.exe:*)"
     ]
   },
   "outputStyle": "Explanatory"
