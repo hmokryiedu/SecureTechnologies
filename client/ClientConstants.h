@@ -11,4 +11,7 @@ namespace ClientConfig {
     
     // Pipe communication
     const int PIPE_BUFFER_SIZE = 512;
+    
+    // Timeout settings
+    const unsigned long long PASSWORD_CRACKING_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
 }

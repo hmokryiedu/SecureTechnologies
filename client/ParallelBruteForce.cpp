@@ -36,9 +36,9 @@ void BruteForceWorker(int threadId,
     // Create partition generator for my assigned first letters
     FirstLetterPartitionGenerator generator(alphabet, maxLength, myFirstLetters);
 
-    // Test passwords until found or exhausted
+    // Test passwords until found, timed out, or exhausted
     // Note: TryPassword() handles its own connect/disconnect cycle per requirements
-    while (generator.HasNext() && !context->IsFound()) {
+    while (generator.HasNext() && !context->ShouldStop()) {
         std::string password = generator.Next();
 
         context->IncrementAttempts();

@@ -184,7 +184,7 @@ void ModeBruteForce() {
     }
 
     // Progress monitoring loop
-    while (!context.IsFound()) {
+    while (!context.ShouldStop()) {
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
 
         // Check if all threads finished
@@ -197,16 +197,19 @@ void ModeBruteForce() {
         }
         if (allFinished) break;
 
-        // Show progress
+        // Show progress with timeout information
         Console::ClearLine();
         unsigned long long attempts = context.GetAttempts();
         unsigned long long elapsed = timer.GetElapsed();
+        unsigned long long remainingMs = ClientConfig::PASSWORD_CRACKING_TIMEOUT_MS - context.GetElapsedMs();
+        
         std::cout << "Attempts: " << attempts << " | ";
         if (elapsed > 0) {
             std::cout << std::fixed << std::setprecision(1)
                      << (attempts * 1000.0 / elapsed) << " pwd/sec";
         }
         std::cout << " | Threads: " << threadCount;
+        std::cout << " | Timeout: " << (remainingMs / 1000) << "s";
         std::cout.flush();
     }
 
@@ -234,6 +237,12 @@ void ModeBruteForce() {
             std::cout << (context.GetAttempts() * 1000.0 / elapsed) << " passwords/second\n";
         }
         Console::PrintSeparator('=', 70);
+    } else if (context.IsTimedOut()) {
+        Console::PrintWarning("TIMEOUT REACHED!");
+        std::cout << "\nPassword cracking timed out after " 
+                  << (ClientConfig::PASSWORD_CRACKING_TIMEOUT_MS / 1000) << " seconds\n";
+        std::cout << "Completed " << context.GetAttempts() << " attempts in "
+                  << timer.GetElapsedFormatted() << "\n";
     } else {
         Console::PrintWarning("Password not found!");
         std::cout << "Completed " << context.GetAttempts() << " attempts in "
@@ -304,14 +313,24 @@ void ModeRuleBasedAttack() {
 
     Timer timer;
     timer.Start();
+    auto attackStartTime = std::chrono::high_resolution_clock::now();
 
     std::string password;
     unsigned long long attemptCount = 0;
     unsigned long long progressInterval = 100;
     bool found = false;
+    bool timedOut = false;
 
-    while ((password = attack.Next()) != "" && !found) {
+    while ((password = attack.Next()) != "" && !found && !timedOut) {
         attemptCount++;
+
+        // Check for timeout
+        auto now = std::chrono::high_resolution_clock::now();
+        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - attackStartTime).count();
+        if (elapsed >= static_cast<long long>(ClientConfig::PASSWORD_CRACKING_TIMEOUT_MS)) {
+            timedOut = true;
+            break;
+        }
 
         if (client.TryPassword(targetLogin, password)) {
             timer.Stop();
@@ -336,10 +355,11 @@ void ModeRuleBasedAttack() {
             break;
         }
 
-        // Show progress
+        // Show progress with timeout information
         if (attemptCount % progressInterval == 0) {
             Console::ClearLine();
             unsigned long long elapsedTime = timer.GetElapsed();
+            unsigned long long remainingMs = ClientConfig::PASSWORD_CRACKING_TIMEOUT_MS - elapsed;
             std::cout << "Attempt " << attemptCount << ": " << password
                       << " | " << std::fixed << std::setprecision(1);
             if (elapsedTime > 0) {
@@ -347,11 +367,20 @@ void ModeRuleBasedAttack() {
             } else {
                 std::cout << "-- pwd/sec";
             }
+            std::cout << " | Timeout: " << (remainingMs / 1000) << "s";
             std::cout.flush();
         }
     }
 
-    if (!found) {
+    if (timedOut) {
+        timer.Stop();
+        Console::ClearLine();
+        Console::PrintWarning("TIMEOUT REACHED!");
+        std::cout << "\nDictionary attack timed out after " 
+                  << (ClientConfig::PASSWORD_CRACKING_TIMEOUT_MS / 1000) << " seconds\n";
+        std::cout << "Tested " << attemptCount << " variants in "
+                  << timer.GetElapsedFormatted() << "\n";
+    } else if (!found) {
         timer.Stop();
         Console::ClearLine();
         Console::PrintWarning("Password not found in dictionary!");
