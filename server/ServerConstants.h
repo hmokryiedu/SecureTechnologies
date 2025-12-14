@@ -1,9 +1,7 @@
 #pragma once
 
 // Server Configuration Constants
-namespace ServerConfig {
-    // Named pipe configuration
-    const int MAX_CONCURRENT_PIPES = 32;  // Number of simultaneous client connections (increased for multithreaded client)
+namespace ServerConfig {  // Number of simultaneous client connections (increased for multithreaded client)
     const int PIPE_BUFFER_SIZE = 512;     // Buffer size for pipe communication
     
     // Anti-brute-force protection

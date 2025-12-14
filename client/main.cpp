@@ -150,17 +150,16 @@ void ModeBruteForce() {
 
     // Auto-detect and configure thread count
     unsigned int hwThreads = std::thread::hardware_concurrency();
-    int maxAllowed = std::min((int)hwThreads, 16);  // Cap at server's 16 pipes
 
-    int threadCount = maxAllowed;
+    int threadCount = hwThreads;
     std::cout << "\nHardware threads detected: " << hwThreads << "\n";
-    std::cout << "Using " << threadCount << " threads (0 to auto-detect, 1-" << maxAllowed << " to specify): ";
+    std::cout << "Using " << threadCount << " threads (0 to auto-detect, 1-" << hwThreads << " to specify): ";
     std::cin >> threadCount;
     std::cin.ignore(10000, '\n');
 
-    if (threadCount == 0) threadCount = maxAllowed;
+    if (threadCount == 0) threadCount = hwThreads;
     if (threadCount < 1) threadCount = 1;
-    if (threadCount > maxAllowed) threadCount = maxAllowed;
+    if (threadCount > hwThreads) threadCount = hwThreads;
 
     Console::PrintInfo("Connecting to server...");
 

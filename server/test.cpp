@@ -1,5 +1,6 @@
 #include <windows.h>
 #include <string>
+#include <thread>
 #include "list.h"
 #include "PipeServer.h"
 #include "ServerContext.h"
@@ -59,7 +60,9 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
                 if (context->GetUsers().Count() == 0) {
                     MessageBox(hwnd, "Please load users file first!", "Error", MB_ICONERROR);
                 } else {
-                    context->GetServer().Start(ServerConfig::MAX_CONCURRENT_PIPES, &context->GetUsers(), hwnd);
+                    unsigned int hwThreads = std::thread::hardware_concurrency() * 2;
+                    MessageBox(hwnd, std::to_string(hwThreads).c_str(), "Info", MB_ICONINFORMATION);
+                    context->GetServer().Start(hwThreads, &context->GetUsers(), hwnd);
                     EnableWindow(GetDlgItem(hwnd, IDC_START_BTN), FALSE); // Блокуємо кнопку
                 }
                 break;
