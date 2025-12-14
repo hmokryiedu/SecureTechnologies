@@ -5,6 +5,7 @@
 #include <map>
 #include <fstream>
 #include <sstream>
+#include "ServerConstants.h"
 
 using namespace std;
 
@@ -17,20 +18,51 @@ private:
     };
 
     vector<User> users;
-    map<string, DWORD> blockedUsers; // Логін -> Час розблокування (GetTickCount)
+    
+    // Мапа: Логін -> Кількість невдалих спроб
+    // Ми використовуємо це замість часового бану
+    map<string, int> attemptCounts; 
+    
     bool protectionMode; // Режим захисту
+    bool isServerRunning;
     int maxLoginLen;
     int maxPassLen;
+    
+    CRITICAL_SECTION cs; // Синхронізація потоків
 
 public:
-    UserList() : protectionMode(false), maxLoginLen(0), maxPassLen(0) {}
+    UserList() : protectionMode(false), isServerRunning(false), maxLoginLen(0), maxPassLen(0) {
+        InitializeCriticalSection(&cs);
+    }
+    
+    ~UserList() {
+        DeleteCriticalSection(&cs);
+    }
 
     void SetProtection(bool enable) {
         protectionMode = enable;
+        // При зміні режиму скидаємо лічильники, щоб почати з чистого аркуша
+        EnterCriticalSection(&cs);
+        attemptCounts.clear();
+        LeaveCriticalSection(&cs);
+    }
+    
+    void SetServerRunning(bool running) {
+        isServerRunning = running;
+    }
+    
+    bool IsServerRunning() const {
+        return isServerRunning;
     }
 
     // Завантаження файлу через діалогове вікно
     bool Load(HWND hwnd) {
+        if (isServerRunning) {
+            MessageBoxA(hwnd, "Cannot load users while server is running!\nPlease stop the server first.", 
+                       "Server Running", MB_ICONWARNING | MB_OK);
+            return false;
+        }
+        
         OPENFILENAMEA ofn;
         char szFile[260] = { 0 };
 
@@ -44,63 +76,80 @@ public:
         ofn.Flags = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST;
 
         if (GetOpenFileNameA(&ofn) == TRUE) {
-            ifstream file(ofn.lpstrFile);
-            if (!file.is_open()) return false;
-
-            users.clear();
-            string line;
-
-            // Читаємо довжини (перший рядок)
-            if (getline(file, line)) {
-                stringstream ss(line);
-                ss >> maxLoginLen >> maxPassLen;
-            }
-
-            // Читаємо пари логін пароль
-            while (getline(file, line)) {
-                stringstream ss(line);
-                string l, p;
-                if (ss >> l >> p) {
-                    users.push_back({ l, p });
-                }
-            }
-            return true;
+            return LoadFromFile(ofn.lpstrFile);
         }
         return false;
+    }
+    
+    // Зчитування з файлу
+    bool LoadFromFile(const string& filepath) {
+        ifstream file(filepath);
+        if (!file.is_open()) return false;
+
+        users.clear();
+        string line;
+
+        // Читаємо довжини (перший рядок)
+        if (getline(file, line)) {
+            stringstream ss(line);
+            ss >> maxLoginLen >> maxPassLen;
+        }
+
+        // Читаємо пари логін пароль
+        while (getline(file, line)) {
+            stringstream ss(line);
+            string l, p;
+            if (ss >> l >> p) {
+                users.push_back({ l, p });
+            }
+        }
+        return true;
     }
 
     size_t Count() const { return users.size(); }
 
-    // Перевірка: 1 = ОК, 0 = Невірний пароль, -1 = Заблоковано
-    int CheckUser(const string& login, const string& pass) {
-        // 1. Перевірка блокування (Anti-Brute-Force)
+    // === ГОЛОВНА ЛОГІКА ПЕРЕВІРКИ ===
+    // Повертає: 1 (Успіх), 0 (Невірно)
+    // Змінює: outNeedDelay (true, якщо треба зачекати 1 секунду)
+    int CheckUser(const string& login, const string& pass, bool& outNeedDelay) {
+        EnterCriticalSection(&cs);
+
+        // 1. За замовчуванням затримка не потрібна
+        outNeedDelay = false;
+
+        // 2. Якщо захист увімкнено, перевіряємо лічильник спроб
         if (protectionMode) {
-            DWORD currentTime = GetTickCount();
-            if (blockedUsers.count(login)) {
-                if (currentTime < blockedUsers[login]) {
-                    return -1; // Ігноруємо запит
-                } else {
-                    blockedUsers.erase(login); // Час бану вийшов
-                }
+            // Якщо спроб >= 3, повідомляємо серверу, що треба ввімкнути затримку
+            if (attemptCounts[login] >= ServerConfig::MAX_ATTEMPTS_BEFORE_DELAY) {
+                outNeedDelay = true;
             }
         }
 
-        // 2. Пошук користувача
+        int result = 0; // За замовчуванням "Невірно"
+
+        // 3. Шукаємо користувача
+        bool found = false;
         for (const auto& u : users) {
             if (u.login == login) {
+                found = true;
                 if (u.password == pass) {
-                    if (protectionMode) blockedUsers.erase(login);
-                    return 1; // Успіх
+                    // --- ПАРОЛЬ ВІРНИЙ ---
+                    result = 1;
+                    // Успішний вхід скидає лічильник помилок
+                    attemptCounts[login] = 0; 
                 } else {
-                    // Невірний пароль
+                    // --- ПАРОЛЬ НЕВІРНИЙ ---
+                    result = 0;
                     if (protectionMode) {
-                        // Бан на 3 секунди (3000 мс)
-                        blockedUsers[login] = GetTickCount() + 3000;
+                        // Збільшуємо лічильник помилок
+                        attemptCounts[login]++; 
                     }
-                    return 0; // Пароль невірний
                 }
+                break; // Користувача знайдено, виходимо з циклу
             }
         }
-        return 0; // Користувача не знайдено
+        
+        LeaveCriticalSection(&cs);
+        return result;
     }
 };

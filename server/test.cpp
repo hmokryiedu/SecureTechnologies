@@ -1,7 +1,10 @@
 #include <windows.h>
 #include <string>
+#include <algorithm> // Для max()
 #include "list.h"
 #include "PipeServer.h"
+#include "ServerContext.h"
+#include "ServerConstants.h"
 
 // Ідентифікатори для кнопок
 #define IDC_LOAD_BTN 101
@@ -9,22 +12,41 @@
 #define IDC_PROTECT_CHK 103
 #define IDC_LOG_LIST 104
 
-UserList g_Users;
-PipeServer g_Server;
+using namespace std;
+
+// Функція для розрахунку оптимальної кількості потоків (Ядра - 1)
+int GetOptimalThreadCount() {
+    SYSTEM_INFO sysInfo;
+    GetSystemInfo(&sysInfo);
+    int numCores = (int)sysInfo.dwNumberOfProcessors; // Отримуємо кількість логічних ядер
+    
+    // Залишаємо одне ядро для GUI та ОС, але не менше 1
+    int optimalCount = max(1, numCores - 1); 
+    
+    // Обмежуємо зверху константою, якщо ядер дуже багато (щоб не перевищити ліміти пам'яті)
+    if (optimalCount > ServerConfig::MAX_CONCURRENT_PIPES) {
+        optimalCount = ServerConfig::MAX_CONCURRENT_PIPES;
+    }
+
+    return optimalCount;
+}
 
 // Функція обробки повідомлень вікна
 LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
+    // Отримуємо ServerContext з даних користувача вікна
+    ServerContext* context = reinterpret_cast<ServerContext*>(GetWindowLongPtr(hwnd, GWLP_USERDATA));
+    
     switch (uMsg) {
     case WM_CREATE:
-        // Кнопка завантаження файлу
+        // Кнопка завантаження файлу (English)
         CreateWindow("BUTTON", "Load Users File", WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON,
             10, 10, 120, 30, hwnd, (HMENU)IDC_LOAD_BTN, NULL, NULL);
 
-        // Чекбокс захисту
+        // Чекбокс захисту (English)
         CreateWindow("BUTTON", "Anti-Brute-Force Mode", WS_VISIBLE | WS_CHILD | BS_AUTOCHECKBOX,
             140, 10, 180, 30, hwnd, (HMENU)IDC_PROTECT_CHK, NULL, NULL);
 
-        // Кнопка старту
+        // Кнопка старту (English)
         CreateWindow("BUTTON", "Start Server", WS_VISIBLE | WS_CHILD | BS_PUSHBUTTON,
             330, 10, 100, 30, hwnd, (HMENU)IDC_START_BTN, NULL, NULL);
 
@@ -35,45 +57,59 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         break;
 
     case WM_COMMAND:
-        switch (LOWORD(wParam)) {
-        case IDC_LOAD_BTN:
-            if (g_Users.Load(hwnd)) {
-                string msg = "Loaded " + to_string(g_Users.Count()) + " users.";
-                SendDlgItemMessage(hwnd, IDC_LOG_LIST, LB_ADDSTRING, 0, (LPARAM)msg.c_str());
-            }
-            break;
+        if (context) {
+            switch (LOWORD(wParam)) {
+            case IDC_LOAD_BTN:
+                if (context->GetUsers().Load(hwnd)) {
+                    string msg = "Loaded " + to_string(context->GetUsers().Count()) + " users.";
+                    SendDlgItemMessage(hwnd, IDC_LOG_LIST, LB_ADDSTRING, 0, (LPARAM)msg.c_str());
+                }
+                break;
 
-        case IDC_PROTECT_CHK:
-            {
-                BOOL checked = IsDlgButtonChecked(hwnd, IDC_PROTECT_CHK);
-                g_Users.SetProtection(checked == BST_CHECKED);
-                SendDlgItemMessage(hwnd, IDC_LOG_LIST, LB_ADDSTRING, 0, 
-                    (LPARAM)(checked ? "Protection ON" : "Protection OFF"));
-            }
-            break;
+            case IDC_PROTECT_CHK:
+                {
+                    BOOL checked = IsDlgButtonChecked(hwnd, IDC_PROTECT_CHK);
+                    context->GetUsers().SetProtection(checked == BST_CHECKED);
+                    SendDlgItemMessage(hwnd, IDC_LOG_LIST, LB_ADDSTRING, 0, 
+                        (LPARAM)(checked ? "Protection ON" : "Protection OFF"));
+                }
+                break;
 
-        case IDC_START_BTN:
-            if (g_Users.Count() == 0) {
-                MessageBox(hwnd, "Please load users file first!", "Error", MB_ICONERROR);
-            } else {
-                g_Server.Start(3, &g_Users, hwnd); // Запускаємо 3 потоки
-                EnableWindow(GetDlgItem(hwnd, IDC_START_BTN), FALSE); // Блокуємо кнопку
+            case IDC_START_BTN:
+                if (context->GetUsers().Count() == 0) {
+                    MessageBox(hwnd, "Please load users file first!", "Error", MB_ICONERROR);
+                } else {
+                    // !!! ГОЛОВНА ЗМІНА: Визначаємо потоки динамічно !!!
+                    int threads = GetOptimalThreadCount();
+                    
+                    context->GetServer().Start(threads, &context->GetUsers(), hwnd);
+                    
+                    EnableWindow(GetDlgItem(hwnd, IDC_START_BTN), FALSE); // Блокуємо кнопку
+                    
+                    string startMsg = "Server started (" + to_string(threads) + " threads).";
+                    SendDlgItemMessage(hwnd, IDC_LOG_LIST, LB_ADDSTRING, 0, (LPARAM)startMsg.c_str());
+                }
+                break;
             }
-            break;
         }
         break;
 
     case WM_LOG_MSG: 
         {
             // Отримали лог від сервера
-            char* text = (char*)wParam;
-            int idx = SendDlgItemMessage(hwnd, IDC_LOG_LIST, LB_ADDSTRING, 0, (LPARAM)text);
+            const char* text = (const char*)wParam;
+            LPARAM len = lParam;
+            std::string logText(text, len);
+            int idx = SendDlgItemMessage(hwnd, IDC_LOG_LIST, LB_ADDSTRING, 0, (LPARAM)logText.c_str());
             SendDlgItemMessage(hwnd, IDC_LOG_LIST, LB_SETTOPINDEX, idx, 0); // Прокрутка вниз
-            delete[] text;
         }
         break;
 
     case WM_DESTROY:
+        if (context) {
+            context->GetServer().Stop();  // Graceful thread cleanup
+            delete context;  // Очищення контексту
+        }
         PostQuitMessage(0);
         break;
 
@@ -83,8 +119,12 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
     return 0;
 }
 
-// Головна функція (замість main)
+// Головна функція
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow) {
+    // Встановлюємо кирилицю для консолі (щоб логи в VS Code були читабельні)
+    SetConsoleCP(1251);
+    SetConsoleOutputCP(1251);
+
     const char CLASS_NAME[] = "LabServerClass";
 
     WNDCLASS wc = {};
@@ -101,6 +141,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
         NULL, NULL, hInstance, NULL);
 
     if (hwnd == NULL) return 0;
+
+    // Створюємо та прикріплюємо ServerContext
+    ServerContext* context = new ServerContext();
+    SetWindowLongPtr(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(context));
 
     ShowWindow(hwnd, nCmdShow);
 
