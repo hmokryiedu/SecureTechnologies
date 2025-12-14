@@ -1,0 +1,53 @@
+# COMPLETE Rule-Based Attack Configuration
+# Covers ALL password patterns from passwords.txt
+# Format: RULE_TYPE vocabulary_file_path
+
+# ============= SIMPLE PATTERNS =============
+CASE_VARIATIONS vocabularies/vocab_common_passwords.txt
+CASE_VARIATIONS vocabularies/vocab_keyboard_patterns.txt
+DIGIT_SUFFIXES vocabularies/vocab_keyboard_patterns.txt
+DIGIT_SUFFIXES vocabularies/vocab_random_combinations.txt
+
+# ============= MULTIPLE EXCLAMATION MARKS =============
+# Covers: Qwerty123!!!, Password123!, 123456789!!!
+MULTIPLE_EXCLAMATION vocabularies/vocab_for_multiple_exclamation.txt
+MULTIPLE_EXCLAMATION vocabularies/vocab_keyboard_patterns.txt
+MULTIPLE_EXCLAMATION vocabularies/vocab_common_passwords.txt
+
+# ============= LONG SEQUENCES =============
+# Covers: Abcdef123456, 123456789!!!
+LONG_SEQUENCES vocabularies/vocab_common_passwords.txt
+LONG_SEQUENCES vocabularies/vocab_keyboard_patterns.txt
+
+# ============= NAMES WITH SPECIAL PATTERNS =============
+# Simple special chars: An1!, Iv2@, Mx3#, Ol4$
+SPECIAL_CHARS vocabularies/vocab_ukrainian_russian_names.txt
+SPECIAL_CHARS vocabularies/vocab_short_words.txt
+
+# ============= COMPLEX SPECIAL COMBOS =============
+# Covers: Xj8!Kv4@, Pb6#Gw2$, Df9!Ql7@, Vb5#Cx3$, Xj8!Kv4@Pb6#, Mw8@Fq6#Xn4!
+COMPLEX_SPECIAL_COMBOS vocabularies/vocab_two_letter_combos.txt
+COMPLEX_SPECIAL_COMBOS vocabularies/vocab_random_combinations.txt
+
+# ============= DATES =============
+# Covers: Anna20001210, Ivan19950315, Maks20100705, Olga19880928
+DATE_SUFFIXES vocabularies/vocab_for_dates.txt
+DATE_SUFFIXES vocabularies/vocab_ukrainian_russian_names.txt
+
+# ============= NAME+CITY COMBINATIONS =============
+NAME_CITY_COMBO vocabularies/vocab_ukrainian_russian_names.txt
+
+# ============= YEARS =============
+YEAR_SUFFIXES vocabularies/vocab_ukrainian_russian_names.txt
+YEAR_SUFFIXES vocabularies/vocab_personal_info.txt
+
+# ============= CYRILLIC =============
+CYRILLIC_LAYOUT vocabularies/vocab_russian_cyrillic.txt
+LATIN_TO_CYRILLIC vocabularies/vocab_common_sequences.txt
+
+# ============= TYPOS =============
+CHARACTER_TRANSPOSE vocabularies/vocab_keyboard_patterns.txt
+CHARACTER_TRANSPOSE vocabularies/vocab_common_passwords.txt
+
+# ============= REVERSAL =============
+STRING_REVERSAL vocabularies/vocab_short_words.txt

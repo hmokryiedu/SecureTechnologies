@@ -27,6 +27,210 @@ const std::map<char, char> RuleBasedAttack::cyrillicToLatin = {
 RuleBasedAttack::RuleBasedAttack() : currentIndex(0) {
 }
 
+// ============= Config File Methods =============
+
+std::string RuleBasedAttack::TrimWhitespace(const std::string& str) const {
+    const size_t first = str.find_first_not_of(" \t\r\n");
+    if (first == std::string::npos) {
+        return "";
+    }
+    const size_t last = str.find_last_not_of(" \t\r\n");
+    return str.substr(first, last - first + 1);
+}
+
+RuleType RuleBasedAttack::ParseRuleType(const std::string& ruleString) const {
+    static const std::map<std::string, RuleType> ruleMap = {
+        {"CASE_VARIATIONS", RuleType::CASE_VARIATIONS},
+        {"DIGIT_SUFFIXES", RuleType::DIGIT_SUFFIXES},
+        {"CYRILLIC_LAYOUT", RuleType::CYRILLIC_LAYOUT},
+        {"CHARACTER_TRANSPOSE", RuleType::CHARACTER_TRANSPOSE},
+        {"STRING_REVERSAL", RuleType::STRING_REVERSAL},
+        {"LATIN_TO_CYRILLIC", RuleType::LATIN_TO_CYRILLIC},
+        {"SPECIAL_CHARS", RuleType::SPECIAL_CHARS},
+        {"YEAR_SUFFIXES", RuleType::YEAR_SUFFIXES},
+        {"NAME_CITY_COMBO", RuleType::NAME_CITY_COMBO},
+        {"MULTIPLE_EXCLAMATION", RuleType::MULTIPLE_EXCLAMATION},
+        {"DATE_SUFFIXES", RuleType::DATE_SUFFIXES},
+        {"LONG_SEQUENCES", RuleType::LONG_SEQUENCES},
+        {"COMPLEX_SPECIAL_COMBOS", RuleType::COMPLEX_SPECIAL_COMBOS}
+    };
+
+    auto it = ruleMap.find(ruleString);
+    return (it != ruleMap.end()) ? it->second : RuleType::INVALID;
+}
+
+bool RuleBasedAttack::LoadVocabularyFile(const std::string& filename, 
+                                          LinkedList<std::string>& vocabulary) const {
+    std::ifstream file(filename);
+    if (!file.is_open()) {
+        return false;
+    }
+
+    std::string word;
+    while (std::getline(file, word)) {
+        const std::string trimmed = TrimWhitespace(word);
+        if (!trimmed.empty()) {
+            vocabulary.push_back(trimmed);
+        }
+    }
+
+    return vocabulary.size() > 0;
+}
+
+bool RuleBasedAttack::LoadConfigFile() {
+    OPENFILENAMEA ofn = {};
+    char fileName[MAX_PATH] = "";
+
+    ofn.lStructSize = sizeof(OPENFILENAMEA);
+    ofn.hwndOwner = NULL;
+    ofn.lpstrFile = fileName;
+    ofn.nMaxFile = sizeof(fileName);
+    ofn.lpstrFilter = "Config Files (*.txt)\0*.txt\0All Files (*.*)\0*.*\0";
+    ofn.nFilterIndex = 1;
+    ofn.lpstrTitle = "Select Rule-Based Attack Configuration";
+    ofn.Flags = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST;
+
+    if (!GetOpenFileNameA(&ofn)) {
+        return false;
+    }
+
+    return LoadConfigFile(fileName);
+}
+
+bool RuleBasedAttack::LoadConfigFile(const std::string& configPath) {
+    std::ifstream configFile(configPath);
+    if (!configFile.is_open()) {
+        return false;
+    }
+
+    // Clear previous state
+    m_ruleSets.clear();
+    variants.clear();
+    variantSet.clear();
+    currentIndex = 0;
+
+    std::string line;
+    size_t lineNumber = 0;
+
+    while (std::getline(configFile, line)) {
+        lineNumber++;
+
+        const std::string trimmed = TrimWhitespace(line);
+
+        // Skip empty lines and comments
+        if (trimmed.empty() || trimmed[0] == '#') {
+            continue;
+        }
+
+        // Parse: RULE_TYPE vocabulary_file_path
+        size_t spacePos = trimmed.find(' ');
+        if (spacePos == std::string::npos) {
+            continue; // Invalid format
+        }
+
+        std::string ruleTypeString = trimmed.substr(0, spacePos);
+        std::string vocabularyPath = TrimWhitespace(trimmed.substr(spacePos + 1));
+
+        // Parse rule type
+        RuleType ruleType = ParseRuleType(ruleTypeString);
+        if (ruleType == RuleType::INVALID) {
+            continue; // Unknown rule type
+        }
+
+        // Create and load rule set
+        RuleSet ruleSet(ruleType);
+        if (!LoadVocabularyFile(vocabularyPath, ruleSet.vocabulary)) {
+            continue; // Failed to load vocabulary
+        }
+
+        m_ruleSets.push_back(ruleSet);
+    }
+
+    return m_ruleSets.size() > 0;
+}
+
+void RuleBasedAttack::ApplySpecificRule(RuleType rule, const std::string& word) {
+    switch (rule) {
+        case RuleType::CASE_VARIATIONS:
+            GenerateCaseVariations(word);
+            break;
+
+        case RuleType::DIGIT_SUFFIXES:
+            GenerateDigitSuffixes(word);
+            break;
+
+        case RuleType::CYRILLIC_LAYOUT: {
+            AddVariant(word); // Add original
+            std::string latinVersion = CyrillicToLatin(word);
+            if (latinVersion != word) {
+                GenerateCaseVariations(latinVersion);
+                GenerateDigitSuffixes(latinVersion);
+            }
+            break;
+        }
+
+        case RuleType::CHARACTER_TRANSPOSE: {
+            AddVariant(word); // Add original
+            auto transposed = TransposeCharacters(word);
+            for (const auto& trans : transposed) {
+                GenerateCaseVariations(trans);
+            }
+            break;
+        }
+
+        case RuleType::STRING_REVERSAL: {
+            AddVariant(word); // Add original
+            std::string reversed = ReversePassword(word);
+            GenerateCaseVariations(reversed);
+            GenerateDigitSuffixes(reversed);
+            break;
+        }
+
+        case RuleType::LATIN_TO_CYRILLIC: {
+            AddVariant(word); // Add original
+            std::string cyrillicVersion = LatinToCyrillic(word);
+            if (cyrillicVersion != word) {
+                GenerateCaseVariations(cyrillicVersion);
+                GenerateDigitSuffixes(cyrillicVersion);
+            }
+            break;
+        }
+
+        case RuleType::SPECIAL_CHARS:
+            GenerateSpecialCharSuffixes(word);
+            break;
+
+        case RuleType::YEAR_SUFFIXES:
+            GenerateYearSuffixes(word);
+            break;
+
+        case RuleType::NAME_CITY_COMBO:
+            GenerateNameCityCombos(word);
+            break;
+
+        case RuleType::MULTIPLE_EXCLAMATION:
+            GenerateMultipleExclamation(word);
+            break;
+
+        case RuleType::DATE_SUFFIXES:
+            GenerateDateSuffixes(word);
+            break;
+
+        case RuleType::LONG_SEQUENCES:
+            GenerateLongSequences(word);
+            break;
+
+        case RuleType::COMPLEX_SPECIAL_COMBOS:
+            GenerateComplexSpecialCombos(word);
+            break;
+
+        case RuleType::INVALID:
+            break;
+    }
+}
+
+// ============= Legacy Dictionary Methods =============
+
 bool RuleBasedAttack::LoadDictionaryFromFile() {
     OPENFILENAMEA ofn = {};
     char fileName[MAX_PATH] = "";
@@ -77,10 +281,19 @@ void RuleBasedAttack::GenerateVariants() {
     variantSet.clear();
     currentIndex = 0;
 
-    // Apply all transformation rules to each dictionary entry
-    // AddVariant() handles duplicate checking via variantSet
-    for (const auto& basePassword : dictionary) {
-        ApplyAllRules(basePassword);
+    // Mode 1: Config-based (each rule has its own vocabulary)
+    if (m_ruleSets.size() > 0) {
+        for (const auto& ruleSet : m_ruleSets) {
+            for (const auto& word : ruleSet.vocabulary) {
+                ApplySpecificRule(ruleSet.type, word);
+            }
+        }
+    }
+    // Mode 2: Legacy dictionary (all rules applied to all words)
+    else if (dictionary.size() > 0) {
+        for (const auto& basePassword : dictionary) {
+            ApplyAllRules(basePassword);
+        }
     }
 }
 
@@ -133,6 +346,8 @@ std::string RuleBasedAttack::ReversePassword(const std::string& password) {
 }
 
 void RuleBasedAttack::GenerateDigitSuffixes(const std::string& base) {
+    // Add base word itself first
+    AddVariant(base);
     // Add common digit suffixes
     AddVariant(base + "1");
     AddVariant(base + "12");
@@ -140,10 +355,185 @@ void RuleBasedAttack::GenerateDigitSuffixes(const std::string& base) {
     AddVariant(base + "1234");
     AddVariant(base + "2023");
     AddVariant(base + "2024");
+    AddVariant(base + "2025");
     AddVariant(base + "0");
     AddVariant(base + "00");
     AddVariant(base + "123456");
     AddVariant(base + "!"); // Common special char
+}
+
+void RuleBasedAttack::GenerateSpecialCharSuffixes(const std::string& base) {
+    // Add base word itself
+    AddVariant(base);
+    // Common special character patterns
+    AddVariant(base + "!");
+    AddVariant(base + "@");
+    AddVariant(base + "#");
+    AddVariant(base + "$");
+    AddVariant(base + "%");
+    AddVariant(base + "1!");
+    AddVariant(base + "2@");
+    AddVariant(base + "3#");
+    AddVariant(base + "4$");
+    AddVariant(base + "123!");
+    AddVariant(base + "!@#");
+    // With case variations
+    if (!base.empty()) {
+        std::string firstUpper = base;
+        firstUpper[0] = ::toupper(firstUpper[0]);
+        AddVariant(firstUpper + "1!");
+        AddVariant(firstUpper + "2@");
+        AddVariant(firstUpper + "3#");
+        AddVariant(firstUpper + "4$");
+    }
+}
+
+void RuleBasedAttack::GenerateYearSuffixes(const std::string& base) {
+    // Add base word itself
+    AddVariant(base);
+    // Common years
+    AddVariant(base + "2024");
+    AddVariant(base + "2025");
+    AddVariant(base + "2023");
+    AddVariant(base + "2022");
+    AddVariant(base + "2020");
+    AddVariant(base + "2000");
+    AddVariant(base + "1990");
+    AddVariant(base + "1995");
+    AddVariant(base + "1988");
+    AddVariant(base + "2010");
+    // Birth year patterns (1980s-2000s)
+    for (int year = 1985; year <= 2005; year++) {
+        AddVariant(base + std::to_string(year));
+    }
+}
+
+void RuleBasedAttack::GenerateNameCityCombos(const std::string& base) {
+    // Add base word itself
+    AddVariant(base);
+    
+    // Common Ukrainian/Russian cities
+    static const std::vector<std::string> cities = {
+        "kiev", "kyiv", "lviv", "odesa", "kharkiv", 
+        "dnipro", "moscow", "piter", "minsk"
+    };
+    
+    for (const auto& city : cities) {
+        AddVariant(base + city);
+        // Capitalize first letter
+        std::string cityCapital = city;
+        if (!cityCapital.empty()) {
+            cityCapital[0] = ::toupper(cityCapital[0]);
+        }
+        AddVariant(base + cityCapital);
+        
+        // Capitalize name first letter
+        if (!base.empty()) {
+            std::string nameCapital = base;
+            nameCapital[0] = ::toupper(nameCapital[0]);
+            AddVariant(nameCapital + city);
+            AddVariant(nameCapital + cityCapital);
+        }
+    }
+}
+
+void RuleBasedAttack::GenerateMultipleExclamation(const std::string& base) {
+    // Add base word itself
+    AddVariant(base);
+    // Multiple exclamation marks
+    AddVariant(base + "!");
+    AddVariant(base + "!!");
+    AddVariant(base + "!!!");
+    // With digits and multiple exclamation
+    AddVariant(base + "1!");
+    AddVariant(base + "12!");
+    AddVariant(base + "123!");
+    AddVariant(base + "1!!");
+    AddVariant(base + "12!!");
+    AddVariant(base + "123!!");
+    AddVariant(base + "1!!!");
+    AddVariant(base + "12!!!");
+    AddVariant(base + "123!!!");
+    // Long digit sequences with exclamation
+    AddVariant(base + "123456!");
+    AddVariant(base + "123456!!");
+    AddVariant(base + "123456!!!");
+    AddVariant(base + "123456789!");
+    AddVariant(base + "123456789!!");
+    AddVariant(base + "123456789!!!");
+}
+
+void RuleBasedAttack::GenerateDateSuffixes(const std::string& base) {
+    // Add base word itself
+    AddVariant(base);
+    // Date formats: YYYYMMDD
+    for (int year = 1985; year <= 2005; year++) {
+        for (int month = 1; month <= 12; month++) {
+            // Common days
+            for (int day : {1, 5, 10, 15, 20, 25, 28}) {
+                char dateStr[9];
+                sprintf(dateStr, "%04d%02d%02d", year, month, day);
+                AddVariant(base + std::string(dateStr));
+            }
+        }
+    }
+}
+
+void RuleBasedAttack::GenerateLongSequences(const std::string& base) {
+    // Add base word itself
+    AddVariant(base);
+    // Long alphabet sequences
+    AddVariant(base + "abcdef");
+    AddVariant(base + "abcdefg");
+    AddVariant(base + "abcdefgh");
+    AddVariant(base + "abcdefghi");
+    AddVariant(base + "abcdefghij");
+    AddVariant(base + "abcdefghijk");
+    AddVariant(base + "abcdefghijkl");
+    // Long digit sequences
+    AddVariant(base + "123456");
+    AddVariant(base + "1234567");
+    AddVariant(base + "12345678");
+    AddVariant(base + "123456789");
+    // With case variations
+    if (!base.empty()) {
+        std::string firstUpper = base;
+        firstUpper[0] = ::toupper(firstUpper[0]);
+        AddVariant(firstUpper + "123456");
+        AddVariant(firstUpper + "123456789");
+    }
+}
+
+void RuleBasedAttack::GenerateComplexSpecialCombos(const std::string& base) {
+    // Add base word itself
+    AddVariant(base);
+    
+    // Complex patterns from passwords.txt
+    // Pattern: Letter+Digit+Special (Xj8!Kv4@)
+    static const std::vector<std::string> patterns = {
+        "1!", "2@", "3#", "4$", "5%", "6^", "7&", "8*", "9!"
+    };
+    
+    // Two-part combinations
+    for (size_t i = 0; i < patterns.size(); i++) {
+        for (size_t j = 0; j < patterns.size(); j++) {
+            if (i != j) {
+                AddVariant(base + patterns[i] + patterns[j]);
+            }
+        }
+    }
+    
+    // Three-part combinations (limited to common ones)
+    AddVariant(base + "1!2@");
+    AddVariant(base + "8!4@");
+    AddVariant(base + "6#2$");
+    AddVariant(base + "9!7@");
+    AddVariant(base + "5#3$");
+    AddVariant(base + "8!4@6#");
+    AddVariant(base + "6#2$9!");
+    AddVariant(base + "9!7@5#");
+    AddVariant(base + "5#3$1!");
+    AddVariant(base + "8@6#4!");
 }
 
 std::string RuleBasedAttack::LatinToCyrillic(const std::string& latin) {

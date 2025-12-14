@@ -234,13 +234,37 @@ void ModeRuleBasedAttack() {
 
     RuleBasedAttack attack;
 
-    Console::PrintInfo("Select dictionary file...");
-    if (!attack.LoadDictionaryFromFile()) {
-        Console::PrintError("No file selected or failed to open!");
-        return;
+    // Select loading mode
+    int loadChoice = 0;
+    std::cout << "\nSelect loading mode:\n";
+    std::cout << " 1. Config file (rule -> vocabulary mapping)\n";
+    std::cout << " 2. Single dictionary (all rules applied)\n";
+    std::cout << "Enter choice (1-2): ";
+    std::cin >> loadChoice;
+    std::cin.ignore(10000, '\n');
+
+    bool loaded = false;
+    if (loadChoice == 1) {
+        Console::PrintInfo("Select configuration file...");
+        if (attack.LoadConfigFile()) {
+            Console::PrintSuccess("Config loaded: " + std::to_string(attack.GetRuleSetCount()) + " rule sets");
+            loaded = true;
+        } else {
+            Console::PrintError("No file selected or invalid config!");
+            return;
+        }
+    } else {
+        Console::PrintInfo("Select dictionary file...");
+        if (attack.LoadDictionaryFromFile()) {
+            Console::PrintSuccess("Dictionary loaded: " + std::to_string(attack.GetDictionarySize()) + " entries");
+            loaded = true;
+        } else {
+            Console::PrintError("No file selected or failed to open!");
+            return;
+        }
     }
 
-    Console::PrintSuccess("Dictionary loaded: " + std::to_string(attack.GetDictionarySize()) + " entries");
+    if (!loaded) return;
 
     Console::PrintInfo("Generating password variants with rules...");
     attack.GenerateVariants();
