@@ -72,7 +72,7 @@ This system implements a **client-server architecture** using **Windows Named Pi
 
 ## Features - Server Component
 
-**Primary Files**: `test.cpp`, `PipeServer.h`, `PerPipeStruct.h`, `list.h`
+**Primary Files**: `server/test.cpp`, `server/PipeServer.h`, `server/PerPipeStruct.h`, `server/list.h`
 
 ### Core Functionality
 
@@ -82,7 +82,7 @@ This system implements a **client-server architecture** using **Windows Named Pi
 - **Buffer Size**: 512 bytes per message
 - **Threading**: 3 concurrent worker threads handle simultaneous connections
 
-#### 2. User Credential Management (`list.h`)
+#### 2. User Credential Management (`server/list.h`)
 - Load credentials from text file (format: `login password` per line)
 - Maximum username/password length: 20 characters (configurable)
 - In-memory storage using STL vectors
@@ -339,12 +339,14 @@ Client                          Server
 ```
 brute-force/
 │
-├── test.cpp                       # Server GUI application (WinMain entry)
-├── PipeServer.h                   # Named pipe server implementation
-├── PerPipeStruct.h                # Per-pipe thread data structure
-├── list.h                         # User credentials list with protection logic
-├── info.txt.txt                   # Sample credentials file (6 test users)
-├── test.exe                       # Compiled server binary (238 KB)
+├── server/
+│   ├── test.cpp                   # Server GUI application (WinMain entry)
+│   ├── PipeServer.h               # Named pipe server implementation
+│   ├── PerPipeStruct.h            # Per-pipe thread data structure
+│   ├── list.h                     # User credentials list with protection logic
+│   ├── ServerConstants.h          # Server configuration constants
+│   ├── ServerContext.h            # Server state encapsulation
+│   └── test.exe                   # Compiled server binary (238 KB)
 │
 ├── client/
 │   ├── main.cpp                   # Client menu and attack mode orchestration (278 lines)
@@ -374,10 +376,10 @@ brute-force/
 
 | File | Lines of Code | Purpose |
 |------|---------------|---------|
-| `test.cpp` | 114 | Server GUI and main entry point |
-| `PipeServer.h` | 113 | Pipe server with threading |
-| `PerPipeStruct.h` | 8 | Data structure for pipe threads |
-| `list.h` | 66 | User management and protection |
+| `server/test.cpp` | 114 | Server GUI and main entry point |
+| `server/PipeServer.h` | 113 | Pipe server with threading |
+| `server/PerPipeStruct.h` | 8 | Data structure for pipe threads |
+| `server/list.h` | 66 | User management and protection |
 | `client/main.cpp` | 278 | Client menu and attack modes |
 | `client/PipeClient.cpp` | 162 | Pipe communication |
 | `client/BruteForce.cpp` | 179 | Password generation engine |
@@ -391,7 +393,7 @@ brute-force/
 
 ### HIGH SEVERITY
 
-#### Issue #1: Memory Leak in PipeServer.h:18-20
+#### Issue #1: Memory Leak in server/PipeServer.h:18-20
 
 **Location**: `PipeServer::Log()` function
 
@@ -432,7 +434,7 @@ void Log(const std::string& text) {
 
 ---
 
-#### Issue #2: No Thread Cleanup Mechanism (PipeServer.h:30-91, 100-112)
+#### Issue #2: No Thread Cleanup Mechanism (server/PipeServer.h:30-91, 100-112)
 
 **Location**: `PipeThreadFunc()` infinite loop and `Start()` method
 
@@ -502,7 +504,7 @@ DWORD WINAPI PipeThreadFunc(LPVOID lpParam) {
 
 ---
 
-#### Issue #3: Memory Safety - Unchecked Buffer Operations (PipeServer.h:26-53)
+#### Issue #3: Memory Safety - Unchecked Buffer Operations (server/PipeServer.h:26-53)
 
 **Location**: `ReadFile()` into fixed 512-byte buffer
 
@@ -615,7 +617,7 @@ bool PipeClient::TryPassword(const std::string& login, const std::string& passwo
 
 ---
 
-#### Issue #5: Silent Protocol Failures (PipeClient.cpp:139-162, PipeServer.h:53-85)
+#### Issue #5: Silent Protocol Failures (PipeClient.cpp:139-162, server/PipeServer.h:53-85)
 
 **Location**: `ReadFile()`/`WriteFile()` error handling in both client and server
 
@@ -755,11 +757,11 @@ std::string RuleBasedAttack::CyrillicToLatin(const std::string& cyrillic) {
 
 | Configuration | Value | Location | Impact |
 |---------------|-------|----------|--------|
-| Pipe name | `\\.\pipe\AuthPipe` | PipeServer.h:8 | Cannot test multiple instances |
-| Thread count | `3` | test.cpp | Inflexible concurrency |
-| Protection timeout | `3000` ms | list.h | Cannot adjust for testing |
-| Buffer size | `512` bytes | PipeServer.h:9 | Cannot handle longer messages |
-| Max password length | `20` chars | list.h | Arbitrary limitation |
+| Pipe name | `\\.\pipe\AuthPipe` | server/PipeServer.h:8 | Cannot test multiple instances |
+| Thread count | `3` | server/test.cpp | Inflexible concurrency |
+| Protection timeout | `3000` ms | server/list.h | Cannot adjust for testing |
+| Buffer size | `512` bytes | server/PipeServer.h:9 | Cannot handle longer messages |
+| Max password length | `20` chars | server/list.h | Arbitrary limitation |
 
 **Impact**:
 - Reduced flexibility for different testing scenarios
@@ -861,7 +863,7 @@ private:
 **Server**:
 ```bash
 cd C:\Users\glebm\projects\tech-safety\brute-force
-g++ -g test.cpp -o test.exe -lcomctl32 -lcomdlg32 -static
+g++ -g server/test.cpp -o server/test.exe -lcomctl32 -lcomdlg32 -static
 ```
 
 **Client**:
@@ -1070,7 +1072,7 @@ This tool is designed **exclusively** for:
 **Project Path**: `tech-safety/brute-force`
 
 **Branch Structure**:
-- `server`: Server-side development (test.exe, PipeServer.h, list.h)
+- `server`: Server-side development (server/test.exe, server/PipeServer.h, server/list.h)
 - `client`: Client-side development (client.exe, attack modes)
 - Recent merges: Periodic integration of client and server branches
 
@@ -1107,8 +1109,8 @@ This tool is designed **exclusively** for:
 3. **Dictionary**: Word list with intelligent transformations
 
 **Key Files to Modify**:
-- Server authentication: `list.h:45-65`
-- Client-server protocol: `PipeServer.h:53-85`, `PipeClient.cpp:45-162`
+- Server authentication: `server/list.h:45-65`
+- Client-server protocol: `server/PipeServer.h:53-85`, `PipeClient.cpp:45-162`
 - Attack algorithms: `BruteForce.cpp:30-120`, `RuleAttack.cpp:50-169`
 
 **Performance Tips**:

@@ -26,9 +26,6 @@ public:
     unsigned long long GetAttemptCount() const { return attemptCount; }
     unsigned long long GetTotalCombinations() const { return totalCombinations; }
     int GetCurrentLength() const { return currentPassword.length(); }
-    
-    // Get password at specific index (for multithreading)
-    std::string GetPasswordAtIndex(unsigned long long index) const;
 
 private:
     unsigned long long CalculateTotalCombinations(int alphabetSize, int maxLen);
