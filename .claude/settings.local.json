@@ -10,7 +10,8 @@
       "Bash(cat:*)",
       "Bash(.clientclient.exe --batch-rule david \"vocabularies\\vocab_common_sequences.txt\" 4)",
       "Bash(cmd /c \"client\\client.exe --batch-rule david vocabularies\\vocab_common_sequences.txt 4\")",
-      "Bash(client.exe:*)"
+      "Bash(client.exe:*)",
+      "Bash(rm:*)"
     ]
   },
   "outputStyle": "Explanatory"
