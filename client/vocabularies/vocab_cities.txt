@@ -8,9 +8,4 @@ kharkiv
 dnipro
 zaporizhzhia
 donetsk
-moscow
-moskva
-petersburg
-piter
-spb
 minsk
